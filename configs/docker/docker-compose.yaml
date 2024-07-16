@@ -1,8 +1,6 @@
-version: '3.8'
-
 services:
   vault_primary:
-    image: vault:latest
+    image: hashicorp/vault:latest
     container_name: vault_primary
     ports:
       - "8200:8200"
@@ -12,7 +10,7 @@ services:
     command: "vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200"
   
   vault_replica:
-    image: vault:latest
+    image: hashicorp/vault:latest
     container_name: vault_replica
     ports:
       - "8201:8200"
@@ -27,5 +25,5 @@ services:
     depends_on:
       - vault_primary
       - vault_replica
-    command: /bin/sh -c "while sleep 1000; do :; done"
+    command: courie setup
 

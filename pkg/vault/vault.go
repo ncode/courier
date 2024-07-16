@@ -8,6 +8,8 @@ import (
 	vault "github.com/hashicorp/vault/api"
 )
 
+var logger *slog.Logger
+
 func init() {
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 }
