@@ -143,6 +143,7 @@ func (vc *VaultClient) EnableAuditDevice(path, type_, description string, option
 		Description: description,
 		Options:     options,
 	})
+
 	if err != nil {
 		return fmt.Errorf("failed to enable audit device: %w", err)
 	}
