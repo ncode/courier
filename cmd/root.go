@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,11 +17,18 @@ package cmd
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
+
+var logger *slog.Logger
+
+func init() {
+	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+}
 
 var cfgFile string
 
@@ -57,6 +64,11 @@ func init() {
 	// will be global for your application.
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.courier.yaml)")
+	rootCmd.PersistentFlags().String("vault.source.address", "http://127.0.0.1:8200", "Vault source address")
+	rootCmd.PersistentFlags().String("vault.source.token", "", "Vault source token")
+	rootCmd.PersistentFlags().String("vault.audit_path", "/courier", "Vault audit path")
+	rootCmd.PersistentFlags().String("vault.audit_address", "127.0.0.1:1269", "Courier audit device address to receive the audit")
+	rootCmd.PersistentFlags().String("vault.audit_description", "Courier audit device", "Vault audit description")
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
@@ -79,10 +91,21 @@ func initConfig() {
 		viper.SetConfigName(".courier")
 	}
 
+	viper.BindPFlag("vault.source.address", rootCmd.PersistentFlags().Lookup("vault.source.address"))
+	viper.BindPFlag("vault.source.token", rootCmd.PersistentFlags().Lookup("vault.source.token"))
+	viper.BindPFlag("vault.audit_path", rootCmd.PersistentFlags().Lookup("vault.audit_path"))
+	viper.BindPFlag("vault.audit_address", rootCmd.PersistentFlags().Lookup("vault.audit_address"))
+	viper.BindPFlag("vault.audit_description", rootCmd.PersistentFlags().Lookup("vault.audit_description"))
+
 	viper.AutomaticEnv() // read in environment variables that match
 
 	// If a config file is found, read it in.
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
+	}
+
+	if viper.GetString("vault.source.token") == "" {
+		logger.Error("vault.source.token is required")
+		os.Exit(1)
 	}
 }
