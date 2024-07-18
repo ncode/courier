@@ -127,18 +127,18 @@ func (vc *VaultClient) DeleteSecret(path string) error {
 	return nil
 }
 
-func (vc *VaultClient) EnableAuditDevice(name, type_, description string, options map[string]string) error {
+func (vc *VaultClient) EnableAuditDevice(path, type_, description string, options map[string]string) error {
 	auditDevices, err := vc.Sys().ListAudit()
 	if err != nil {
 		return fmt.Errorf("failed to list audit devices: %w", err)
 	}
 
-	if _, exists := auditDevices[name+"/"]; exists {
-		logger.Info("Audit device already exists", "name", name)
+	if _, exists := auditDevices[path]; exists {
+		logger.Info("Audit device already exists", "name", path)
 		return nil
 	}
 
-	err = vc.Sys().EnableAuditWithOptions(name, &vault.EnableAuditOptions{
+	err = vc.Sys().EnableAuditWithOptions(path, &vault.EnableAuditOptions{
 		Type:        type_,
 		Description: description,
 		Options:     options,
@@ -147,6 +147,6 @@ func (vc *VaultClient) EnableAuditDevice(name, type_, description string, option
 		return fmt.Errorf("failed to enable audit device: %w", err)
 	}
 
-	logger.Info("Enabled audit device", "name", name)
+	logger.Info("Enabled audit device", "name", path)
 	return nil
 }
