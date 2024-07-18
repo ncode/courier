@@ -4,23 +4,39 @@ Copyright © 2024 Juliano Martinez
 package cmd
 
 import (
-	"fmt"
+	"os"
 
+	"github.com/ncode/courier/pkg/vault"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 // setupCmd represents the setup command
 var setupCmd = &cobra.Command{
 	Use:   "setup",
 	Short: "Setup vault audit device",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
+	Long:  ``,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("setup called")
+		client, err := vault.NewVaultClient(viper.GetString("vault.source.address"), vault.TokenAuth{Token: viper.GetString("vault.source.token")})
+		if err != nil {
+			logger.Error("setup", "unable to setup vault client", err.Error())
+			os.Exit(1)
+		}
+		err = client.EnableAuditDevice(
+			viper.GetString("vault.audit_path"),
+			"socket",
+			viper.GetString("vault.audit_description"),
+			map[string]string{
+				"address":     viper.GetString("vault.audit_address"),
+				"description": viper.GetString("vault.audit_description"),
+				"socket_type": "udp",
+				"log_raw":     "true",
+			},
+		)
+		if err != nil {
+			logger.Error("setup", "unable to enable audit device", err.Error())
+			os.Exit(1)
+		}
 	},
 }
 
