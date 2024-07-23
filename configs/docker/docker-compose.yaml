@@ -7,6 +7,8 @@ services:
     environment:
       VAULT_DEV_ROOT_TOKEN_ID: "root"
       VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
     command: "vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200"
   
   vault_replica:
@@ -17,13 +19,36 @@ services:
     environment:
       VAULT_DEV_ROOT_TOKEN_ID: "root"
       VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
     command: "vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200"
 
-  courier:
+  courier_auditserver:
     image: ncode/courier:dev
-    container_name: courier
+    container_name: courier_auditserver
     depends_on:
       - vault_primary
       - vault_replica
-    command: courie setup
+    command: "auditServer --vault.source.token root --vault.audit_address courier_auditserver:1269"
+
+  courier_setup:
+    image: ncode/courier:dev
+    container_name: courier_setup
+    depends_on:
+      - courier_auditserver
+    command: "setup --vault.source.token root --vault.source.address http://vault_primary:8200 --vault.audit_address courier_auditserver:1269"
+
+  vault_client:
+    image: hashicorp/vault:latest
+    container_name: vault_client
+    depends_on:
+      - courier_setup
+    volumes:
+      - ./scripts:/scripts:ro
+    environment:
+      VAULT_TOKEN: root
+      VAULT_ADDR: http://vault_primary:8200
+    cap_add:
+      - IPC_LOCK
+    entrypoint: "/scripts/client.sh"
 
