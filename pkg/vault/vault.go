@@ -37,6 +37,16 @@ type CertAuth struct {
 	KeyFile  string
 }
 
+type JWTAuth struct {
+	Role string
+	JWT  string
+}
+
+type K8sAuth struct {
+	Role string
+	JWT  string
+}
+
 func (t TokenAuth) Authenticate(client *vault.Client) error {
 	client.SetToken(t.Token)
 	return nil
@@ -83,6 +93,40 @@ func (c CertAuth) ConfigureTLS(config *vault.Config) error {
 	return nil
 }
 
+func (j JWTAuth) Authenticate(client *vault.Client) error {
+	data := map[string]interface{}{
+		"role": j.Role,
+		"jwt":  j.JWT,
+	}
+	secret, err := client.Logical().Write("auth/jwt/login", data)
+	if err != nil {
+		return fmt.Errorf("failed to authenticate with JWT: %w", err)
+	}
+	client.SetToken(secret.Auth.ClientToken)
+	return nil
+}
+
+func (j JWTAuth) ConfigureTLS(*vault.Config) error {
+	return nil
+}
+
+func (k K8sAuth) Authenticate(client *vault.Client) error {
+	data := map[string]interface{}{
+		"role": k.Role,
+		"jwt":  k.JWT,
+	}
+	secret, err := client.Logical().Write("auth/kubernetes/login", data)
+	if err != nil {
+		return fmt.Errorf("failed to authenticate with Kubernetes: %w", err)
+	}
+	client.SetToken(secret.Auth.ClientToken)
+	return nil
+}
+
+func (k K8sAuth) ConfigureTLS(*vault.Config) error {
+	return nil
+}
+
 func NewVaultClient(address string, authMethod AuthMethod) (*VaultClient, error) {
 	config := vault.DefaultConfig()
 	config.Address = address
@@ -92,9 +136,22 @@ func NewVaultClient(address string, authMethod AuthMethod) (*VaultClient, error)
 		return nil, fmt.Errorf("failed to create Vault client: %w", err)
 	}
 
-	err = authMethod.Authenticate(client)
-	if err != nil {
-		return nil, err
+	// Configure TLS if necessary
+	if err := authMethod.ConfigureTLS(config); err != nil {
+		return nil, fmt.Errorf("failed to configure TLS: %w", err)
+	}
+
+	// Authenticate
+	if err := authMethod.Authenticate(client); err != nil {
+		return nil, fmt.Errorf("failed to authenticate: %w", err)
+	}
+
+	// For TokenAuth, validate the token
+	if _, ok := authMethod.(TokenAuth); ok {
+		_, err = client.Auth().Token().LookupSelf()
+		if err != nil {
+			return nil, fmt.Errorf("failed to validate token: %w", err)
+		}
 	}
 
 	return &VaultClient{client}, nil
@@ -133,9 +190,8 @@ func (vc *VaultClient) EnableAuditDevice(path, type_, description string, option
 		return fmt.Errorf("failed to list audit devices: %w", err)
 	}
 
-	if _, exists := auditDevices[path]; exists {
-		logger.Info("Audit device already exists", "name", path)
-		return nil
+	if _, exists := auditDevices[path+"/"]; exists {
+		return fmt.Errorf("audit device already exists: %s", path)
 	}
 
 	err = vc.Sys().EnableAuditWithOptions(path, &vault.EnableAuditOptions{
@@ -143,11 +199,9 @@ func (vc *VaultClient) EnableAuditDevice(path, type_, description string, option
 		Description: description,
 		Options:     options,
 	})
-
 	if err != nil {
 		return fmt.Errorf("failed to enable audit device: %w", err)
 	}
 
-	logger.Info("Enabled audit device", "name", path)
 	return nil
 }
