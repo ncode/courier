@@ -1,6 +1,7 @@
 package auditserver
 
 import (
+	"bytes"
 	"encoding/json"
 	"github.com/panjf2000/gnet"
 	"log/slog"
@@ -23,11 +24,17 @@ type AuditServer struct {
 }
 
 func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet.Action) {
+	if !bytes.Contains(frame, []byte(`"operation":"update"`)) && !bytes.Contains(frame, []byte(`"operation":"create"`)) {
+		// Skip events that are not relevant for courier
+		return nil, gnet.Close
+	}
+
 	var auditLog AuditLog
+
 	err := json.Unmarshal(frame, &auditLog)
 	if err != nil {
 		as.logger.Error("Error parsing audit log", "error", err)
-		return
+		return nil, gnet.Close
 	}
 
 	logAttrs := []any{
