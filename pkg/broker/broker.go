@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/tidwall/redcon"
 )
@@ -13,6 +14,7 @@ type Server struct {
 	logger    *slog.Logger
 	ps        redcon.PubSub
 	tlsConfig *tls.Config
+	mu        sync.Mutex
 }
 
 func NewServer(addr string, logger *slog.Logger, certFile, keyFile string) (*Server, error) {
@@ -43,6 +45,9 @@ func (s *Server) ListenAndServeTLS() error {
 }
 
 func (s *Server) handleCommand(conn redcon.Conn, cmd redcon.Command) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	switch strings.ToLower(string(cmd.Args[0])) {
 	default:
 		conn.WriteError("ERR unknown command '" + string(cmd.Args[0]) + "'")
@@ -84,6 +89,9 @@ func (s *Server) handleAccept(conn redcon.Conn) bool {
 }
 
 func (s *Server) handleClose(conn redcon.Conn, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if err != nil {
 		s.logger.Error("Connection closed with error", "client", conn.RemoteAddr(), "error", err)
 	} else {

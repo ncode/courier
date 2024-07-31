@@ -126,6 +126,10 @@ func TestPubSub(t *testing.T) {
 	pubsub := subscriber.Subscribe(ctx, "test-channel")
 	defer pubsub.Close()
 
+	// Wait for subscription to be established
+	_, err := pubsub.Receive(ctx)
+	assert.NoError(t, err)
+
 	// Test Publish
 	msg, err := publisher.Publish(ctx, "test-channel", "Hello, World!").Result()
 	assert.NoError(t, err)
@@ -140,6 +144,9 @@ func TestPubSub(t *testing.T) {
 	// Test Unsubscribe
 	err = pubsub.Unsubscribe(ctx, "test-channel")
 	assert.NoError(t, err)
+
+	// Wait for unsubscribe to take effect
+	time.Sleep(100 * time.Millisecond)
 
 	// Publish again, should have no subscribers
 	msg, err = publisher.Publish(ctx, "test-channel", "Hello again!").Result()
@@ -160,6 +167,12 @@ func TestMultipleSubscribers(t *testing.T) {
 	pubsub2 := subscriber2.Subscribe(ctx, "test-channel")
 	defer pubsub1.Close()
 	defer pubsub2.Close()
+
+	// Wait for subscriptions to be established
+	_, err := pubsub1.Receive(ctx)
+	assert.NoError(t, err)
+	_, err = pubsub2.Receive(ctx)
+	assert.NoError(t, err)
 
 	msg, err := publisher.Publish(ctx, "test-channel", "Hello, everyone!").Result()
 	assert.NoError(t, err)
