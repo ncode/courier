@@ -65,7 +65,7 @@ func (s *Server) handleCommand(conn redcon.Conn, cmd redcon.Command) {
 		message := string(cmd.Args[2])
 		numSubs := s.ps.Publish(channel, message)
 		conn.WriteInt(numSubs)
-		s.logger.Info("PUBLISH command", "channel", channel, "subscribers", numSubs)
+		s.logger.Debug("PUBLISH command", "channel", channel, "subscribers", numSubs)
 	case "subscribe", "psubscribe":
 		if len(cmd.Args) < 2 {
 			conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
@@ -79,7 +79,7 @@ func (s *Server) handleCommand(conn redcon.Conn, cmd redcon.Command) {
 				s.ps.Subscribe(conn, string(cmd.Args[i]))
 			}
 		}
-		s.logger.Info(strings.ToUpper(command)+" command", "patterns", cmd.Args[1:])
+		s.logger.Debug(strings.ToUpper(command)+" command", "patterns", cmd.Args[1:])
 	}
 }
 
@@ -92,7 +92,7 @@ func (s *Server) handleClose(conn redcon.Conn, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err != nil {
+	if err != nil && err.Error() != "detached" {
 		s.logger.Error("Connection closed with error", "client", conn.RemoteAddr(), "error", err)
 	} else {
 		s.logger.Info("Connection closed", "client", conn.RemoteAddr())

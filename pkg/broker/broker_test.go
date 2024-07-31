@@ -116,42 +116,70 @@ func newTLSClient() *redis.Client {
 }
 
 func TestPubSub(t *testing.T) {
-	ctx := context.Background()
-	publisher := newTLSClient()
-	subscriber := newTLSClient()
-	defer publisher.Close()
-	defer subscriber.Close()
+	tests := []struct {
+		name                   string
+		channel                string
+		message                string
+		expectedSubs           int64
+		unsubscribe            bool
+		publishAgain           bool
+		expectedSubsAfterUnsub int64
+	}{
+		{
+			name:         "Single subscriber",
+			channel:      "test-channel-1",
+			message:      "Hello, World!",
+			expectedSubs: 1,
+			unsubscribe:  false,
+			publishAgain: false,
+		},
+		{
+			name:                   "Unsubscribe",
+			channel:                "test-channel-2",
+			message:                "Hello, World!",
+			expectedSubs:           1,
+			unsubscribe:            true,
+			publishAgain:           true,
+			expectedSubsAfterUnsub: 0,
+		},
+	}
 
-	// Test Subscribe
-	pubsub := subscriber.Subscribe(ctx, "test-channel")
-	defer pubsub.Close()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			publisher := newTLSClient()
+			subscriber := newTLSClient()
+			defer publisher.Close()
+			defer subscriber.Close()
 
-	// Wait for subscription to be established
-	_, err := pubsub.Receive(ctx)
-	assert.NoError(t, err)
+			pubsub := subscriber.Subscribe(ctx, tt.channel)
+			defer pubsub.Close()
 
-	// Test Publish
-	msg, err := publisher.Publish(ctx, "test-channel", "Hello, World!").Result()
-	assert.NoError(t, err)
-	assert.Equal(t, int64(1), msg) // Expecting 1 subscriber
+			_, err := pubsub.Receive(ctx)
+			assert.NoError(t, err)
 
-	// Test receiving the message
-	message, err := pubsub.ReceiveMessage(ctx)
-	assert.NoError(t, err)
-	assert.Equal(t, "Hello, World!", message.Payload)
-	assert.Equal(t, "test-channel", message.Channel)
+			msg, err := publisher.Publish(ctx, tt.channel, tt.message).Result()
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedSubs, msg)
 
-	// Test Unsubscribe
-	err = pubsub.Unsubscribe(ctx, "test-channel")
-	assert.NoError(t, err)
+			message, err := pubsub.ReceiveMessage(ctx)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.message, message.Payload)
+			assert.Equal(t, tt.channel, message.Channel)
 
-	// Wait for unsubscribe to take effect
-	time.Sleep(100 * time.Millisecond)
+			if tt.unsubscribe {
+				err = pubsub.Unsubscribe(ctx, tt.channel)
+				assert.NoError(t, err)
+				time.Sleep(100 * time.Millisecond)
+			}
 
-	// Publish again, should have no subscribers
-	msg, err = publisher.Publish(ctx, "test-channel", "Hello again!").Result()
-	assert.NoError(t, err)
-	assert.Equal(t, int64(0), msg) // Expecting 0 subscribers
+			if tt.publishAgain {
+				msg, err = publisher.Publish(ctx, tt.channel, "Hello again!").Result()
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedSubsAfterUnsub, msg)
+			}
+		})
+	}
 }
 
 func TestMultipleSubscribers(t *testing.T) {
@@ -185,4 +213,27 @@ func TestMultipleSubscribers(t *testing.T) {
 	message2, err := pubsub2.ReceiveMessage(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, "Hello, everyone!", message2.Payload)
+}
+
+func TestPSubscribe(t *testing.T) {
+	ctx := context.Background()
+	publisher := newTLSClient()
+	subscriber := newTLSClient()
+	defer publisher.Close()
+	defer subscriber.Close()
+
+	pubsub := subscriber.PSubscribe(ctx, "test-*")
+	defer pubsub.Close()
+
+	_, err := pubsub.Receive(ctx)
+	assert.NoError(t, err)
+
+	msg, err := publisher.Publish(ctx, "test-channel", "Hello, pattern!").Result()
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1), msg)
+
+	message, err := pubsub.ReceiveMessage(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, "Hello, pattern!", message.Payload)
+	assert.Equal(t, "test-channel", message.Channel)
 }
