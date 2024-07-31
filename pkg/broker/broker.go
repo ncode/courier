@@ -1,95 +1,92 @@
 package broker
 
 import (
-	"context"
 	"crypto/tls"
-	"crypto/x509"
-	"fmt"
-	"io/ioutil"
 	"log/slog"
-	"os"
+	"strings"
 
-	"github.com/redis/go-redis/v9"
+	"github.com/tidwall/redcon"
 )
 
-var logger *slog.Logger
-
-func init() {
-	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+type Server struct {
+	addr      string
+	logger    *slog.Logger
+	ps        redcon.PubSub
+	tlsConfig *tls.Config
 }
 
-type Broker struct {
-	address     string
-	cert        tls.Certificate
-	caCert      *x509.CertPool
-	redisClient *redis.Client
-}
-
-func NewBroker(address, certFile, keyFile, caFile string) (*Broker, error) {
-	var cert tls.Certificate
-	var caCertPool *x509.CertPool
-	var err error
-
-	if certFile != "" && keyFile != "" {
-		cert, err = tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load certificate: %w", err)
-		}
+func NewServer(addr string, logger *slog.Logger, certFile, keyFile string) (*Server, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, err
 	}
 
-	if caFile != "" {
-		caCert, err := ioutil.ReadFile(caFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read CA cert: %w", err)
-		}
-		caCertPool = x509.NewCertPool()
-		caCertPool.AppendCertsFromPEM(caCert)
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
 	}
 
-	redisClient := redis.NewClient(&redis.Options{
-		Addr: address,
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			RootCAs:      caCertPool,
-		},
-	})
-
-	return &Broker{
-		address:     address,
-		cert:        cert,
-		caCert:      caCertPool,
-		redisClient: redisClient,
+	return &Server{
+		addr:      addr,
+		logger:    logger,
+		tlsConfig: tlsConfig,
 	}, nil
 }
 
-func (b *Broker) Produce(topic string, message []byte) error {
-	ctx := context.Background()
-	err := b.redisClient.Publish(ctx, topic, message).Err()
-	if err != nil {
-		return fmt.Errorf("failed to publish message: %w", err)
-	}
-	logger.Info("Message produced", "topic", topic)
-	return nil
+func (s *Server) ListenAndServeTLS() error {
+	s.logger.Info("Starting TLS server", "address", s.addr)
+	return redcon.ListenAndServeTLS(s.addr,
+		s.handleCommand,
+		s.handleAccept,
+		s.handleClose,
+		s.tlsConfig,
+	)
 }
 
-func (b *Broker) Consume(topic string, callback func([]byte) error) error {
-	ctx := context.Background()
-	pubsub := b.redisClient.Subscribe(ctx, topic)
-	defer pubsub.Close()
-
-	ch := pubsub.Channel()
-
-	logger.Info("Consumer started", "topic", topic)
-	for msg := range ch {
-		err := callback([]byte(msg.Payload))
-		if err != nil {
-			logger.Error("Callback error", "error", err)
+func (s *Server) handleCommand(conn redcon.Conn, cmd redcon.Command) {
+	switch strings.ToLower(string(cmd.Args[0])) {
+	default:
+		conn.WriteError("ERR unknown command '" + string(cmd.Args[0]) + "'")
+	case "ping":
+		conn.WriteString("PONG")
+	case "quit":
+		conn.WriteString("OK")
+		conn.Close()
+	case "publish":
+		if len(cmd.Args) != 3 {
+			conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+			return
 		}
+		channel := string(cmd.Args[1])
+		message := string(cmd.Args[2])
+		numSubs := s.ps.Publish(channel, message)
+		conn.WriteInt(numSubs)
+		s.logger.Info("PUBLISH command", "channel", channel, "subscribers", numSubs)
+	case "subscribe", "psubscribe":
+		if len(cmd.Args) < 2 {
+			conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+			return
+		}
+		command := strings.ToLower(string(cmd.Args[0]))
+		for i := 1; i < len(cmd.Args); i++ {
+			if command == "psubscribe" {
+				s.ps.Psubscribe(conn, string(cmd.Args[i]))
+			} else {
+				s.ps.Subscribe(conn, string(cmd.Args[i]))
+			}
+		}
+		s.logger.Info(strings.ToUpper(command)+" command", "patterns", cmd.Args[1:])
 	}
-
-	return nil
 }
 
-func (b *Broker) Close() error {
-	return b.redisClient.Close()
+func (s *Server) handleAccept(conn redcon.Conn) bool {
+	s.logger.Info("New connection accepted", "client", conn.RemoteAddr())
+	return true
+}
+
+func (s *Server) handleClose(conn redcon.Conn, err error) {
+	if err != nil {
+		s.logger.Error("Connection closed with error", "client", conn.RemoteAddr(), "error", err)
+	} else {
+		s.logger.Info("Connection closed", "client", conn.RemoteAddr())
+	}
 }

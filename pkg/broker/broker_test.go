@@ -1,98 +1,175 @@
 package broker
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"fmt"
+	"github.com/redis/go-redis/v9"
+	"log/slog"
+	"math/big"
+	"net"
+	"os"
 	"testing"
 	"time"
 
-	"github.com/go-redis/redismock/v9"
+	"github.com/stretchr/testify/assert"
 )
 
-func TestNewBroker(t *testing.T) {
-	tests := []struct {
-		name    string
-		address string
-		wantErr bool
-	}{
-		{"Valid Broker", "localhost:6379", false},
-		{"Empty Address", "", true},
-	}
+const (
+	serverAddr = "localhost:6380"
+)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewBroker(tt.address, "", "", "")
-			if (err != nil) != tt.wantErr {
-				t.Errorf("NewBroker() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
+var (
+	testServer *Server
+	certFile   string
+	keyFile    string
+)
 
-func TestBroker_Produce(t *testing.T) {
-	db, mock := redismock.NewClientMock()
-	broker := &Broker{redisClient: db}
-
-	mock.ExpectPublish("test_topic", "test_message").SetVal(1)
-
-	err := broker.Produce("test_topic", []byte("test_message"))
+func generateTempCert() (string, string, error) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		t.Errorf("Broker.Produce() error = %v", err)
+		return "", "", err
 	}
 
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("there were unfulfilled expectations: %s", err)
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Test Co"},
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(time.Hour * 24 * 180),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
 	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return "", "", err
+	}
+
+	certFile, err := os.CreateTemp("", "cert*.pem")
+	if err != nil {
+		return "", "", err
+	}
+	keyFile, err := os.CreateTemp("", "key*.pem")
+	if err != nil {
+		return "", "", err
+	}
+
+	pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
+
+	return certFile.Name(), keyFile.Name(), nil
 }
 
-func TestBroker_Consume(t *testing.T) {
-	db, mock := redismock.NewClientMock()
-	broker := &Broker{redisClient: db}
+func TestMain(m *testing.M) {
+	var err error
+	certFile, keyFile, err = generateTempCert()
+	if err != nil {
+		fmt.Printf("Failed to generate temporary certificates: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.Remove(certFile)
+	defer os.Remove(keyFile)
 
-	mock.ExpectSubscribe("test_topic")
-	pubsub := mock.NewPubSub()
-	mock.ExpectPSubscribe("test_topic").SetVal(pubsub)
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+
+	testServer, err = NewServer(serverAddr, logger, certFile, keyFile)
+	if err != nil {
+		fmt.Printf("Failed to create server: %v\n", err)
+		os.Exit(1)
+	}
 
 	go func() {
-		time.Sleep(100 * time.Millisecond)
-		pubsub.Publish("test_topic", "test_message")
+		if err := testServer.ListenAndServeTLS(); err != nil {
+			fmt.Printf("Failed to start server: %v\n", err)
+			os.Exit(1)
+		}
 	}()
 
-	messageReceived := make(chan struct{})
-	err := broker.Consume("test_topic", func(msg []byte) error {
-		if string(msg) != "test_message" {
-			t.Errorf("Broker.Consume() got = %v, want %v", string(msg), "test_message")
-		}
-		close(messageReceived)
-		return nil
-	})
+	// Wait for the server to start
+	time.Sleep(time.Second)
 
-	select {
-	case <-messageReceived:
-		// Message was received successfully
-	case <-time.After(1 * time.Second):
-		t.Error("Timed out waiting for message")
-	}
+	// Run tests
+	code := m.Run()
 
-	if err != nil {
-		t.Errorf("Broker.Consume() error = %v", err)
-	}
-
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("there were unfulfilled expectations: %s", err)
-	}
+	// Exit
+	os.Exit(code)
 }
 
-func TestBroker_Close(t *testing.T) {
-	db, mock := redismock.NewClientMock()
-	broker := &Broker{redisClient: db}
+func newTLSClient() *redis.Client {
+	return redis.NewClient(&redis.Options{
+		Addr: serverAddr,
+		TLSConfig: &tls.Config{
+			InsecureSkipVerify: true, // Only for testing. In production, use proper certificate verification.
+		},
+	})
+}
 
-	mock.ExpectClose().SetVal(nil)
+func TestPubSub(t *testing.T) {
+	ctx := context.Background()
+	publisher := newTLSClient()
+	subscriber := newTLSClient()
+	defer publisher.Close()
+	defer subscriber.Close()
 
-	err := broker.Close()
-	if err != nil {
-		t.Errorf("Broker.Close() error = %v", err)
-	}
+	// Test Subscribe
+	pubsub := subscriber.Subscribe(ctx, "test-channel")
+	defer pubsub.Close()
 
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("there were unfulfilled expectations: %s", err)
-	}
+	// Test Publish
+	msg, err := publisher.Publish(ctx, "test-channel", "Hello, World!").Result()
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1), msg) // Expecting 1 subscriber
+
+	// Test receiving the message
+	message, err := pubsub.ReceiveMessage(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, "Hello, World!", message.Payload)
+	assert.Equal(t, "test-channel", message.Channel)
+
+	// Test Unsubscribe
+	err = pubsub.Unsubscribe(ctx, "test-channel")
+	assert.NoError(t, err)
+
+	// Publish again, should have no subscribers
+	msg, err = publisher.Publish(ctx, "test-channel", "Hello again!").Result()
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), msg) // Expecting 0 subscribers
+}
+
+func TestMultipleSubscribers(t *testing.T) {
+	ctx := context.Background()
+	publisher := newTLSClient()
+	subscriber1 := newTLSClient()
+	subscriber2 := newTLSClient()
+	defer publisher.Close()
+	defer subscriber1.Close()
+	defer subscriber2.Close()
+
+	pubsub1 := subscriber1.Subscribe(ctx, "test-channel")
+	pubsub2 := subscriber2.Subscribe(ctx, "test-channel")
+	defer pubsub1.Close()
+	defer pubsub2.Close()
+
+	msg, err := publisher.Publish(ctx, "test-channel", "Hello, everyone!").Result()
+	assert.NoError(t, err)
+	assert.Equal(t, int64(2), msg) // Expecting 2 subscribers
+
+	message1, err := pubsub1.ReceiveMessage(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, "Hello, everyone!", message1.Payload)
+
+	message2, err := pubsub2.ReceiveMessage(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, "Hello, everyone!", message2.Payload)
 }
