@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"github.com/panjf2000/gnet"
+	"github.com/redis/go-redis/v9"
 	"log/slog"
 	"net"
 	"os"
@@ -38,61 +39,122 @@ func (m *mockConn) Next(n int) (buf []byte, err error)  { return nil, nil }
 func TestAuditServer_React(t *testing.T) {
 	tests := []struct {
 		name           string
-		input          interface{}
+		input          AuditLog
 		expectedAction gnet.Action
 		expectedLog    bool
 	}{
 		{
-			name: "Valid update operation",
-			input: map[string]interface{}{
-				"type":        "audit",
-				"time":        "2023-07-31T12:34:56Z",
-				"operation":   "update",
-				"auth":        map[string]interface{}{"user": "testuser"},
-				"request":     map[string]interface{}{"id": "123"},
-				"response":    map[string]interface{}{"status": "success"},
-				"remote_addr": "192.168.1.1",
+			name: "Valid KV update operation",
+			input: AuditLog{
+				Type: "audit",
+				Time: "2023-07-31T12:34:56Z",
+				Auth: Auth{
+					PolicyResults: struct {
+						Allowed bool `json:"allowed"`
+					}{Allowed: true},
+				},
+				Request: Request{
+					Operation: "update",
+					MountType: "kv",
+					Path:      "/secret/data/test",
+				},
+				Response: Response{
+					MountType: "kv",
+				},
+				RemoteAddr: "192.168.1.1",
 			},
 			expectedAction: gnet.None,
 			expectedLog:    true,
 		},
 		{
-			name: "Valid create operation",
-			input: map[string]interface{}{
-				"type":        "audit",
-				"time":        "2023-07-31T12:34:56Z",
-				"operation":   "create",
-				"auth":        map[string]interface{}{"user": "testuser"},
-				"request":     map[string]interface{}{"id": "123"},
-				"response":    map[string]interface{}{"status": "success"},
-				"remote_addr": "192.168.1.1",
+			name: "Valid KV create operation",
+			input: AuditLog{
+				Type: "audit",
+				Time: "2023-07-31T12:34:56Z",
+				Auth: Auth{
+					PolicyResults: struct {
+						Allowed bool `json:"allowed"`
+					}{Allowed: true},
+				},
+				Request: Request{
+					Operation: "create",
+					MountType: "kv",
+					Path:      "/secret/data/test",
+				},
+				Response: Response{
+					MountType: "kv",
+				},
+				RemoteAddr: "192.168.1.1",
 			},
 			expectedAction: gnet.None,
 			expectedLog:    true,
 		},
 		{
-			name: "Invalid operation",
-			input: map[string]interface{}{
-				"type":        "audit",
-				"time":        "2023-07-31T12:34:56Z",
-				"operation":   "delete",
-				"auth":        map[string]interface{}{"user": "testuser"},
-				"request":     map[string]interface{}{"id": "123"},
-				"response":    map[string]interface{}{"status": "success"},
-				"remote_addr": "192.168.1.1",
+			name: "Valid KV delete operation",
+			input: AuditLog{
+				Type: "audit",
+				Time: "2023-07-31T12:34:56Z",
+				Auth: Auth{
+					PolicyResults: struct {
+						Allowed bool `json:"allowed"`
+					}{Allowed: true},
+				},
+				Request: Request{
+					Operation: "delete",
+					MountType: "kv",
+					Path:      "/secret/data/test",
+				},
+				Response: Response{
+					MountType: "kv",
+				},
+				RemoteAddr: "192.168.1.1",
+			},
+			expectedAction: gnet.None,
+			expectedLog:    true,
+		},
+		{
+			name: "Non-KV operation",
+			input: AuditLog{
+				Type: "audit",
+				Time: "2023-07-31T12:34:56Z",
+				Auth: Auth{
+					PolicyResults: struct {
+						Allowed bool `json:"allowed"`
+					}{Allowed: true},
+				},
+				Request: Request{
+					Operation: "update",
+					MountType: "transit",
+					Path:      "/transit/keys/test",
+				},
+				Response: Response{
+					MountType: "transit",
+				},
+				RemoteAddr: "192.168.1.1",
 			},
 			expectedAction: gnet.Close,
 			expectedLog:    false,
 		},
 		{
-			name:           "Invalid JSON",
-			input:          []byte(`{"invalid json, "operation":"create"`),
-			expectedAction: gnet.Close,
-			expectedLog:    true, // We expect an error log
-		},
-		{
-			name:           "Empty frame",
-			input:          []byte{},
+			name: "Disallowed operation",
+			input: AuditLog{
+				Type: "audit",
+				Time: "2023-07-31T12:34:56Z",
+				Auth: Auth{
+					PolicyResults: struct {
+						Allowed bool `json:"allowed"`
+					}{Allowed: false},
+				},
+				Request: Request{
+					Operation: "update",
+					MountType: "kv",
+					Path:      "/secret/data/test",
+				},
+				Response: Response{
+					MountType: "kv",
+				},
+				RemoteAddr: "192.168.1.1",
+			},
 			expectedAction: gnet.Close,
 			expectedLog:    false,
 		},
@@ -103,17 +165,11 @@ func TestAuditServer_React(t *testing.T) {
 			var logBuffer bytes.Buffer
 			logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-			server := New(logger)
+			server := New(logger, nil)
 
-			var inputJSON []byte
-			if b, ok := tt.input.([]byte); ok {
-				inputJSON = b
-			} else {
-				var err error
-				inputJSON, err = json.Marshal(tt.input)
-				if err != nil {
-					t.Fatalf("Failed to marshal input: %v", err)
-				}
+			inputJSON, err := json.Marshal(tt.input)
+			if err != nil {
+				t.Fatalf("Failed to marshal input: %v", err)
 			}
 
 			_, action := server.React(inputJSON, &mockConn{})
@@ -137,16 +193,10 @@ func TestAuditServer_React(t *testing.T) {
 						t.Fatalf("Failed to parse log output: %v", err)
 					}
 
-					if tt.name == "Invalid JSON" {
-						if _, ok := logEntry["error"]; !ok {
-							t.Errorf("Expected 'error' field in log for invalid JSON, but it was missing")
-						}
-					} else {
-						expectedFields := []string{"type", "time", "remote_addr"}
-						for _, field := range expectedFields {
-							if _, ok := logEntry[field]; !ok {
-								t.Errorf("Expected '%s' field in log, but it was missing", field)
-							}
+					expectedFields := []string{"operation", "path"}
+					for _, field := range expectedFields {
+						if _, ok := logEntry[field]; !ok {
+							t.Errorf("Expected '%s' field in log, but it was missing", field)
 						}
 					}
 				}
@@ -158,16 +208,23 @@ func TestAuditServer_React(t *testing.T) {
 }
 
 func TestNew(t *testing.T) {
-	// Test with nil logger
-	server := New(nil)
+	// Test with nil logger and nil publisher
+	server := New(nil, nil)
 	if server.logger == nil {
 		t.Errorf("Expected non-nil logger when initialized with nil")
 	}
+	if server.publisher == nil {
+		t.Errorf("Expected non-nil publisher when initialized with nil")
+	}
 
-	// Test with custom logger
+	// Test with custom logger and publisher
 	customLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	server = New(customLogger)
+	customPublisher := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+	server = New(customLogger, customPublisher)
 	if server.logger != customLogger {
 		t.Errorf("Expected custom logger to be used")
+	}
+	if server.publisher != customPublisher {
+		t.Errorf("Expected custom publisher to be used")
 	}
 }
