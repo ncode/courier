@@ -30,7 +30,7 @@ var setupCmd = &cobra.Command{
 				"address":     viper.GetString("vault.audit_address"),
 				"description": viper.GetString("vault.audit_description"),
 				"socket_type": "udp",
-				"log_raw":     "true",
+				"log_raw":     "false",
 			},
 		)
 		if err != nil {

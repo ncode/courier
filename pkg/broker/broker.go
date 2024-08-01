@@ -18,6 +18,14 @@ type Server struct {
 }
 
 func NewServer(addr string, logger *slog.Logger, certFile, keyFile string) (*Server, error) {
+	if certFile == "" || keyFile == "" {
+		return &Server{
+			addr:      addr,
+			logger:    logger,
+			tlsConfig: nil,
+		}, nil
+	}
+
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, err
@@ -41,6 +49,15 @@ func (s *Server) ListenAndServeTLS() error {
 		s.handleAccept,
 		s.handleClose,
 		s.tlsConfig,
+	)
+}
+
+func (s *Server) ListenAndServe() error {
+	s.logger.Info("Starting TLS server", "address", s.addr)
+	return redcon.ListenAndServe(s.addr,
+		s.handleCommand,
+		s.handleAccept,
+		s.handleClose,
 	)
 }
 
