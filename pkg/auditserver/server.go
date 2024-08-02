@@ -97,12 +97,8 @@ func New(logger *slog.Logger, publisher *redis.Client) *AuditServer {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
-	if publisher == nil {
-		publisher = redis.NewClient(&redis.Options{
-			Addr: "localhost:6379",
-		})
-	}
 	return &AuditServer{
-		logger: logger,
+		logger:    logger,
+		publisher: publisher,
 	}
 }

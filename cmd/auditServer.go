@@ -16,9 +16,12 @@ limitations under the License.
 package cmd
 
 import (
+	"crypto/tls"
 	"fmt"
 	"github.com/ncode/courier/pkg/auditserver"
+	"github.com/ncode/courier/pkg/broker"
 	"github.com/panjf2000/gnet"
+	"github.com/redis/go-redis/v9"
 	"github.com/spf13/viper"
 	"log"
 
@@ -37,7 +40,37 @@ This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		addr := fmt.Sprintf("udp://%s", viper.GetString("vault.audit_address"))
-		server := auditserver.New(nil, nil)
+
+		var tlsConfig *tls.Config
+		var redisClient *redis.Client
+		if viper.GetBool("publisher.tls") {
+			cert, err := tls.LoadX509KeyPair(viper.GetString("publisher.server_cert"), viper.GetString("publisher.server_key"))
+			if err != nil {
+				log.Fatalf("Failed to load certificate: %v", err)
+			}
+			tlsConfig = &tls.Config{
+				MinVersion:   tls.VersionTLS12,
+				Certificates: []tls.Certificate{cert},
+			}
+
+			redisClient = redis.NewClient(&redis.Options{
+				TLSConfig: tlsConfig,
+			})
+		}
+
+		if viper.GetBool("publisher.server") {
+			broker, err := broker.NewServer(viper.GetString("publisher.address"), nil)
+			if err != nil {
+				log.Fatalf("Failed to create publisher server: %v", err)
+			}
+			if viper.GetBool("publisher.tls") {
+				go func() { log.Fatal(broker.ListenAndServeTLS(tlsConfig)) }()
+			} else {
+				go func() { log.Fatal(broker.ListenAndServe()) }()
+			}
+		}
+
+		server := auditserver.New(nil, redisClient)
 		log.Fatal(gnet.Serve(server, addr, gnet.WithMulticore(true)))
 	},
 }
@@ -45,13 +78,14 @@ to quickly create a Cobra application.`,
 func init() {
 	rootCmd.AddCommand(auditServerCmd)
 
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// auditServerCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// auditServerCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	auditServerCmd.PersistentFlags().Bool("publisher.server", true, "enables local publisher server")
+	auditServerCmd.PersistentFlags().String("publisher.server_cert", "", "certificate file for publisher server")
+	auditServerCmd.PersistentFlags().String("publisher.server_key", "", "key file for publisher server")
+	auditServerCmd.PersistentFlags().Bool("publisher.tls", true, "publish messages via TLS")
+	auditServerCmd.PersistentFlags().String("publisher.address", "127.0.0.1:6380", "A help for foo")
+	viper.BindPFlag("publisher.server", auditServerCmd.PersistentFlags().Lookup("publisher.server"))
+	viper.BindPFlag("publisher.server_cert", auditServerCmd.PersistentFlags().Lookup("publisher.server_cert"))
+	viper.BindPFlag("publisher.server_key", auditServerCmd.PersistentFlags().Lookup("publisher.server_key"))
+	viper.BindPFlag("publisher.tls", auditServerCmd.PersistentFlags().Lookup("publisher.tls"))
+	viper.BindPFlag("publisher.address", auditServerCmd.PersistentFlags().Lookup("publisher.address"))
 }
