@@ -2,7 +2,9 @@ package broker
 
 import (
 	"crypto/tls"
+	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 
@@ -10,50 +12,37 @@ import (
 )
 
 type Server struct {
-	addr      string
-	logger    *slog.Logger
-	ps        redcon.PubSub
-	tlsConfig *tls.Config
-	mu        sync.Mutex
+	addr   string
+	logger *slog.Logger
+	ps     redcon.PubSub
+	mu     sync.Mutex
 }
 
-func NewServer(addr string, logger *slog.Logger, certFile, keyFile string) (*Server, error) {
-	if certFile == "" || keyFile == "" {
-		return &Server{
-			addr:      addr,
-			logger:    logger,
-			tlsConfig: nil,
-		}, nil
+func NewServer(addr string, logger *slog.Logger) (*Server, error) {
+	if logger == nil {
+		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
-
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, err
-	}
-
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-	}
-
 	return &Server{
-		addr:      addr,
-		logger:    logger,
-		tlsConfig: tlsConfig,
+		addr:   addr,
+		logger: logger,
 	}, nil
 }
 
-func (s *Server) ListenAndServeTLS() error {
+func (s *Server) ListenAndServeTLS(tlsConfig *tls.Config) error {
+	if tlsConfig == nil {
+		return fmt.Errorf("TLS config is nil")
+	}
 	s.logger.Info("Starting TLS server", "address", s.addr)
 	return redcon.ListenAndServeTLS(s.addr,
 		s.handleCommand,
 		s.handleAccept,
 		s.handleClose,
-		s.tlsConfig,
+		tlsConfig,
 	)
 }
 
 func (s *Server) ListenAndServe() error {
-	s.logger.Info("Starting TLS server", "address", s.addr)
+	s.logger.Info("Starting server", "address", s.addr)
 	return redcon.ListenAndServe(s.addr,
 		s.handleCommand,
 		s.handleAccept,

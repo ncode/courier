@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"github.com/redis/go-redis/v9"
+	"log"
 	"log/slog"
 	"math/big"
 	"net"
@@ -78,19 +79,26 @@ func TestMain(m *testing.M) {
 	}
 	defer os.Remove(certFile)
 	defer os.Remove(keyFile)
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		log.Fatalf("Failed to load certificate: %v", err)
+	}
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: slog.LevelDebug,
 	}))
 
-	testServer, err = NewServer(serverAddr, logger, certFile, keyFile)
+	testServer, err = NewServer(serverAddr, logger)
 	if err != nil {
 		fmt.Printf("Failed to create server: %v\n", err)
 		os.Exit(1)
 	}
 
 	go func() {
-		if err := testServer.ListenAndServeTLS(); err != nil {
+		if err := testServer.ListenAndServeTLS(tlsConfig); err != nil {
 			fmt.Printf("Failed to start server: %v\n", err)
 			os.Exit(1)
 		}
