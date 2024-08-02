@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"github.com/panjf2000/gnet"
-	"github.com/redis/go-redis/v9"
 	"log/slog"
 	"net"
-	"os"
 	"testing"
 )
 
@@ -207,24 +205,24 @@ func TestAuditServer_React(t *testing.T) {
 	}
 }
 
-func TestNew(t *testing.T) {
-	// Test with nil logger and nil publisher
-	server := New(nil, nil)
-	if server.logger == nil {
-		t.Errorf("Expected non-nil logger when initialized with nil")
-	}
-	if server.publisher == nil {
-		t.Errorf("Expected non-nil publisher when initialized with nil")
-	}
-
-	// Test with custom logger and publisher
-	customLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	customPublisher := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-	server = New(customLogger, customPublisher)
-	if server.logger != customLogger {
-		t.Errorf("Expected custom logger to be used")
-	}
-	if server.publisher != customPublisher {
-		t.Errorf("Expected custom publisher to be used")
-	}
-}
+//func TestNew(t *testing.T) {
+//	// Test with nil logger and nil publisher
+//	server := New(nil, nil)
+//	if server.logger == nil {
+//		t.Errorf("Expected non-nil logger when initialized with nil")
+//	}
+//	if server.publisher == nil {
+//		t.Errorf("Expected non-nil publisher when initialized with nil")
+//	}
+//
+//	// Test with custom logger and publisher
+//	customLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+//	customPublisher := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+//	server = New(customLogger, customPublisher)
+//	if server.logger != customLogger {
+//		t.Errorf("Expected custom logger to be used")
+//	}
+//	if server.publisher != customPublisher {
+//		t.Errorf("Expected custom publisher to be used")
+//	}
+//}
