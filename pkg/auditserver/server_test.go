@@ -308,3 +308,43 @@ func TestAuditServer_React_LoggingBehavior(t *testing.T) {
 		t.Errorf("Expected log output to contain the operation 'update', got: %s", logOutput)
 	}
 }
+
+func TestAuditServer_React_JSONParseError(t *testing.T) {
+	var logBuffer bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelError}))
+	server := New(logger, nil)
+
+	// Create an input that will pass the initial checks but fail JSON unmarshaling
+	invalidInput := []byte(`{"auth":{"policy_results":{"allowed":true}},"request":{"mount_type":"kv","operation":"update"},"response":{"mount_type":"kv"},"invalid_json":}`)
+
+	_, action := server.React(invalidInput, &mockConn{})
+
+	// Check that the action is gnet.Close
+	if action != gnet.Close {
+		t.Errorf("Expected gnet.Close action for JSON parse error, got %v", action)
+	}
+
+	// Check that an error was logged
+	logOutput := logBuffer.String()
+	if !strings.Contains(logOutput, "Error parsing audit log") {
+		t.Errorf("Expected log output to contain 'Error parsing audit log', got: %s", logOutput)
+	}
+
+	// Parse the log output to check for the error details
+	var logEntry map[string]interface{}
+	err := json.Unmarshal([]byte(logOutput), &logEntry)
+	if err != nil {
+		t.Fatalf("Failed to parse log output: %v", err)
+	}
+
+	if logEntry["level"] != "ERROR" {
+		t.Errorf("Expected log level to be ERROR, got: %s", logEntry["level"])
+	}
+
+	errorMsg, ok := logEntry["error"].(string)
+	if !ok {
+		t.Errorf("Expected 'error' field in log output to be a string")
+	} else if !strings.Contains(errorMsg, "invalid character") {
+		t.Errorf("Expected error message to contain 'invalid character', got: %s", errorMsg)
+	}
+}
