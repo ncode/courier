@@ -326,3 +326,63 @@ func TestListenAndServe(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "PONG", pong)
 }
+
+func TestPublishWrongArguments(t *testing.T) {
+	client := newTLSClient()
+	defer client.Close()
+
+	ctx := context.Background()
+
+	// Test with too few arguments
+	_, err := client.Do(ctx, "PUBLISH").Result()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ERR wrong number of arguments for 'PUBLISH' command")
+
+	// Test with too many arguments
+	_, err = client.Do(ctx, "PUBLISH", "channel", "message", "extra").Result()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ERR wrong number of arguments for 'PUBLISH' command")
+
+	// Test with correct number of arguments (should not error)
+	result, err := client.Publish(ctx, "test-channel", "test-message").Result()
+	assert.NoError(t, err)
+	assert.GreaterOrEqual(t, result, int64(0)) // The result should be the number of clients that received the message
+}
+
+func TestSubscribeWrongArguments(t *testing.T) {
+	client := newTLSClient()
+	defer client.Close()
+
+	ctx := context.Background()
+
+	// Test with too few arguments
+	cmd := client.Do(ctx, "SUBSCRIBE")
+	_, err := cmd.Result()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ERR wrong number of arguments for 'SUBSCRIBE' command")
+
+	// Test with correct number of arguments (should not error)
+	pubsub := client.Subscribe(ctx, "test-channel")
+	defer pubsub.Close()
+	_, err = pubsub.Receive(ctx)
+	assert.NoError(t, err)
+}
+
+func TestPSubscribeWrongArguments(t *testing.T) {
+	client := newTLSClient()
+	defer client.Close()
+
+	ctx := context.Background()
+
+	// Test with too few arguments
+	cmd := client.Do(ctx, "PSUBSCRIBE")
+	_, err := cmd.Result()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ERR wrong number of arguments for 'PSUBSCRIBE' command")
+
+	// Test with correct number of arguments (should not error)
+	pubsub := client.PSubscribe(ctx, "test-*")
+	defer pubsub.Close()
+	_, err = pubsub.Receive(ctx)
+	assert.NoError(t, err)
+}
