@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/require"
 	"log"
 	"log/slog"
 	"math/big"
@@ -244,4 +245,84 @@ func TestPSubscribe(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "Hello, pattern!", message.Payload)
 	assert.Equal(t, "test-channel", message.Channel)
+}
+
+func TestNewServerNilLogger(t *testing.T) {
+	server, err := NewServer(serverAddr, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, server)
+	assert.NotNil(t, server.logger)
+}
+
+func TestListenAndServeTLSNilConfig(t *testing.T) {
+	server, err := NewServer(serverAddr, nil)
+	assert.NoError(t, err)
+
+	err = server.ListenAndServeTLS(nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "TLS config is nil")
+}
+
+func TestPing(t *testing.T) {
+	ctx := context.Background()
+	client := newTLSClient()
+	defer client.Close()
+
+	pong, err := client.Ping(ctx).Result()
+	assert.NoError(t, err)
+	assert.Equal(t, "PONG", pong)
+}
+
+func TestQuit(t *testing.T) {
+	client := newTLSClient()
+	defer client.Close()
+
+	ctx := context.Background()
+
+	// First, ensure we can ping
+	pong, err := client.Ping(ctx).Result()
+	assert.NoError(t, err)
+	assert.Equal(t, "PONG", pong)
+
+	// Now, send QUIT command
+	result, err := client.Do(ctx, "QUIT").Result()
+	assert.NoError(t, err)
+	assert.Equal(t, "OK", result)
+}
+
+func TestListenAndServe(t *testing.T) {
+	addr := "localhost:6381"
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+
+	server, err := NewServer(addr, logger)
+	require.NoError(t, err)
+
+	go func() {
+		err := server.ListenAndServe()
+		if err != nil {
+			t.Logf("ListenAndServe error: %v", err)
+		}
+	}()
+
+	// Wait for the server to start
+	time.Sleep(time.Second)
+
+	// Try to connect
+	conn, err := net.Dial("tcp", addr)
+	assert.NoError(t, err)
+	assert.NotNil(t, conn)
+	conn.Close()
+
+	// Create a Redis client to test functionality
+	client := redis.NewClient(&redis.Options{
+		Addr: addr,
+	})
+	defer client.Close()
+
+	ctx := context.Background()
+	pong, err := client.Ping(ctx).Result()
+	assert.NoError(t, err)
+	assert.Equal(t, "PONG", pong)
 }

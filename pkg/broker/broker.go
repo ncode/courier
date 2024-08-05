@@ -56,12 +56,15 @@ func (s *Server) handleCommand(conn redcon.Conn, cmd redcon.Command) {
 
 	switch strings.ToLower(string(cmd.Args[0])) {
 	default:
+		s.logger.Debug("Unknown command", "command", string(cmd.Args[0]))
 		conn.WriteError("ERR unknown command '" + string(cmd.Args[0]) + "'")
 	case "ping":
 		conn.WriteString("PONG")
 	case "quit":
 		conn.WriteString("OK")
 		conn.Close()
+		s.logger.Debug("Client quit", "address", conn.RemoteAddr())
+		return
 	case "publish":
 		if len(cmd.Args) != 3 {
 			conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
