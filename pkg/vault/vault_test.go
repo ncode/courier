@@ -451,6 +451,44 @@ func TestVaultClient_Operations(t *testing.T) {
 				assert.Equal(t, []string{"internal server error"}, vaultErr.Errors)
 			},
 		},
+		{
+			name:      "EnableAuditDevice_EnableFailure",
+			operation: "EnableAudit",
+			path:      "test-audit",
+			input: map[string]interface{}{
+				"type":        "file",
+				"description": "Test audit device",
+				"options":     map[string]string{"file_path": "/tmp/audit.log"},
+			},
+			setupMock: func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/sys/audit":
+					if r.Method == http.MethodGet {
+						w.WriteHeader(http.StatusOK)
+						w.Write([]byte(`{"data":{}}`)) // Empty list of audit devices
+					} else {
+						t.Fatalf("Unexpected request to %s", r.URL.Path)
+					}
+				case "/v1/sys/audit/test-audit":
+					if r.Method == http.MethodPut {
+						w.WriteHeader(http.StatusInternalServerError)
+						w.Write([]byte(`{"errors": ["failed to enable audit device"]}`))
+					} else {
+						t.Fatalf("Unexpected request to %s", r.URL.Path)
+					}
+				default:
+					t.Fatalf("Unexpected request to %s", r.URL.Path)
+				}
+			},
+			expectedErr: true,
+			checkError: func(t *testing.T, err error) {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "failed to enable audit device")
+				var vaultErr *vault.ResponseError
+				assert.True(t, errors.As(err, &vaultErr), "error should be or wrap a vault.ResponseError")
+				assert.Equal(t, []string{"failed to enable audit device"}, vaultErr.Errors)
+			},
+		},
 	}
 
 	for _, tt := range tests {
