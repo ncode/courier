@@ -304,6 +304,25 @@ func TestVaultClient_Operations(t *testing.T) {
 			expectedErr: true,
 		},
 		{
+			name:      "ReadSecret_Error",
+			operation: "Read",
+			path:      "secret/data/error",
+			setupMock: func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/v1/secret/data/error", r.URL.Path)
+				assert.Equal(t, http.MethodGet, r.Method)
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"errors": ["internal server error"]}`))
+			},
+			expectedErr: true,
+			checkError: func(t *testing.T, err error) {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "failed to read secret")
+				var vaultErr *vault.ResponseError
+				assert.True(t, errors.As(err, &vaultErr), "error should be or wrap a vault.ResponseError")
+				assert.Equal(t, []string{"internal server error"}, vaultErr.Errors)
+			},
+		},
+		{
 			name:      "WriteSecret_Success",
 			operation: "Write",
 			path:      "secret/data/test",
@@ -407,50 +426,26 @@ func TestVaultClient_Operations(t *testing.T) {
 			expectedErr: true,
 		},
 		{
-			name:      "ReadSecret_Success",
-			operation: "Read",
-			path:      "secret/data/test",
+			name:      "EnableAuditDevice_ListFailure",
+			operation: "EnableAudit",
+			path:      "test-audit",
+			input: map[string]interface{}{
+				"type":        "file",
+				"description": "Test audit device",
+				"options":     map[string]string{"file_path": "/tmp/audit.log"},
+			},
 			setupMock: func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, "/v1/secret/data/test", r.URL.Path)
-				assert.Equal(t, http.MethodGet, r.Method)
-				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(`{"data": {"data": {"foo": "bar"}}}`))
-			},
-			expectedErr: false,
-			checkResult: func(t *testing.T, result interface{}) {
-				data, ok := result.(map[string]interface{})
-				assert.True(t, ok)
-				assert.Equal(t, "bar", data["data"].(map[string]interface{})["foo"])
-			},
-		},
-		{
-			name:      "ReadSecret_NotFound",
-			operation: "Read",
-			path:      "secret/data/nonexistent",
-			setupMock: func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, "/v1/secret/data/nonexistent", r.URL.Path)
-				assert.Equal(t, http.MethodGet, r.Method)
-				w.WriteHeader(http.StatusNotFound)
-			},
-			expectedErr: true,
-			checkError: func(t *testing.T, err error) {
-				assert.Contains(t, err.Error(), "secret not found")
-			},
-		},
-		{
-			name:      "ReadSecret_Error",
-			operation: "Read",
-			path:      "secret/data/error",
-			setupMock: func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, "/v1/secret/data/error", r.URL.Path)
-				assert.Equal(t, http.MethodGet, r.Method)
-				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(`{"errors": ["internal server error"]}`))
+				if r.URL.Path == "/v1/sys/audit" && r.Method == http.MethodGet {
+					w.WriteHeader(http.StatusInternalServerError)
+					w.Write([]byte(`{"errors": ["internal server error"]}`))
+				} else {
+					t.Fatalf("Unexpected request to %s", r.URL.Path)
+				}
 			},
 			expectedErr: true,
 			checkError: func(t *testing.T, err error) {
 				assert.Error(t, err)
-				assert.Contains(t, err.Error(), "failed to read secret")
+				assert.Contains(t, err.Error(), "failed to list audit devices")
 				var vaultErr *vault.ResponseError
 				assert.True(t, errors.As(err, &vaultErr), "error should be or wrap a vault.ResponseError")
 				assert.Equal(t, []string{"internal server error"}, vaultErr.Errors)
