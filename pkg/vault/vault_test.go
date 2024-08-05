@@ -273,6 +273,7 @@ func TestVaultClient_Operations(t *testing.T) {
 		setupMock   func(w http.ResponseWriter, r *http.Request)
 		expectedErr bool
 		checkResult func(t *testing.T, result interface{})
+		checkError  func(t *testing.T, err error)
 	}{
 		{
 			name:      "ReadSecret_Success",
@@ -405,6 +406,56 @@ func TestVaultClient_Operations(t *testing.T) {
 			},
 			expectedErr: true,
 		},
+		{
+			name:      "ReadSecret_Success",
+			operation: "Read",
+			path:      "secret/data/test",
+			setupMock: func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/v1/secret/data/test", r.URL.Path)
+				assert.Equal(t, http.MethodGet, r.Method)
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(`{"data": {"data": {"foo": "bar"}}}`))
+			},
+			expectedErr: false,
+			checkResult: func(t *testing.T, result interface{}) {
+				data, ok := result.(map[string]interface{})
+				assert.True(t, ok)
+				assert.Equal(t, "bar", data["data"].(map[string]interface{})["foo"])
+			},
+		},
+		{
+			name:      "ReadSecret_NotFound",
+			operation: "Read",
+			path:      "secret/data/nonexistent",
+			setupMock: func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/v1/secret/data/nonexistent", r.URL.Path)
+				assert.Equal(t, http.MethodGet, r.Method)
+				w.WriteHeader(http.StatusNotFound)
+			},
+			expectedErr: true,
+			checkError: func(t *testing.T, err error) {
+				assert.Contains(t, err.Error(), "secret not found")
+			},
+		},
+		{
+			name:      "ReadSecret_Error",
+			operation: "Read",
+			path:      "secret/data/error",
+			setupMock: func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/v1/secret/data/error", r.URL.Path)
+				assert.Equal(t, http.MethodGet, r.Method)
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"errors": ["internal server error"]}`))
+			},
+			expectedErr: true,
+			checkError: func(t *testing.T, err error) {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "failed to read secret")
+				var vaultErr *vault.ResponseError
+				assert.True(t, errors.As(err, &vaultErr), "error should be or wrap a vault.ResponseError")
+				assert.Equal(t, []string{"internal server error"}, vaultErr.Errors)
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -431,6 +482,9 @@ func TestVaultClient_Operations(t *testing.T) {
 
 			if tt.expectedErr {
 				assert.Error(t, err)
+				if tt.checkError != nil {
+					tt.checkError(t, err)
+				}
 			} else {
 				assert.NoError(t, err)
 				if tt.checkResult != nil {
