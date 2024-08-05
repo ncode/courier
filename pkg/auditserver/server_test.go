@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"github.com/panjf2000/gnet"
+	"github.com/redis/go-redis/v9"
+	"io"
 	"log/slog"
 	"net"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -205,24 +209,102 @@ func TestAuditServer_React(t *testing.T) {
 	}
 }
 
-//func TestNew(t *testing.T) {
-//	// Test with nil logger and nil publisher
-//	server := New(nil, nil)
-//	if server.logger == nil {
-//		t.Errorf("Expected non-nil logger when initialized with nil")
-//	}
-//	if server.publisher == nil {
-//		t.Errorf("Expected non-nil publisher when initialized with nil")
-//	}
-//
-//	// Test with custom logger and publisher
-//	customLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-//	customPublisher := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-//	server = New(customLogger, customPublisher)
-//	if server.logger != customLogger {
-//		t.Errorf("Expected custom logger to be used")
-//	}
-//	if server.publisher != customPublisher {
-//		t.Errorf("Expected custom publisher to be used")
-//	}
-//}
+func TestNew(t *testing.T) {
+	// Test with nil logger and nil publisher
+	server := New(nil, nil)
+	if server.logger == nil {
+		t.Errorf("Expected non-nil logger when initialized with nil")
+	}
+	if server.publisher != nil {
+		t.Errorf("Expected nil publisher when initialized with nil")
+	}
+
+	// Test with custom logger and publisher
+	customLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	customPublisher := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+	server = New(customLogger, customPublisher)
+	if server.logger != customLogger {
+		t.Errorf("Expected custom logger to be used")
+	}
+	if server.publisher != customPublisher {
+		t.Errorf("Expected custom publisher to be used")
+	}
+}
+
+func TestAuditServer_React_InvalidJSON(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	server := New(logger, nil)
+
+	invalidJSON := []byte(`{"invalid": json}`)
+	_, action := server.React(invalidJSON, &mockConn{})
+
+	if action != gnet.Close {
+		t.Errorf("Expected gnet.Close action for invalid JSON, got %v", action)
+	}
+}
+
+func TestAuditServer_React_NonRelevantOperations(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	server := New(logger, nil)
+
+	nonRelevantOps := []string{"read", "list", "sudo"}
+	for _, op := range nonRelevantOps {
+		input := AuditLog{
+			Auth: Auth{
+				PolicyResults: struct {
+					Allowed bool `json:"allowed"`
+				}{Allowed: true},
+			},
+			Request: Request{
+				Operation: op,
+				MountType: "kv",
+			},
+			Response: Response{
+				MountType: "kv",
+			},
+		}
+
+		inputJSON, _ := json.Marshal(input)
+		_, action := server.React(inputJSON, &mockConn{})
+
+		if action != gnet.Close {
+			t.Errorf("Expected gnet.Close action for non-relevant operation %s, got %v", op, action)
+		}
+	}
+}
+
+func TestAuditServer_React_LoggingBehavior(t *testing.T) {
+	var logBuffer bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	server := New(logger, nil)
+
+	validInput := AuditLog{
+		Auth: Auth{
+			PolicyResults: struct {
+				Allowed bool `json:"allowed"`
+			}{Allowed: true},
+		},
+		Request: Request{
+			Operation: "update",
+			MountType: "kv",
+			Path:      "/secret/test",
+		},
+		Response: Response{
+			MountType: "kv",
+		},
+	}
+
+	inputJSON, _ := json.Marshal(validInput)
+	server.React(inputJSON, &mockConn{})
+
+	logOutput := logBuffer.String()
+	if !strings.Contains(logOutput, "Received audit log") {
+		t.Errorf("Expected log output to contain 'Received audit log', got: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "/secret/test") {
+		t.Errorf("Expected log output to contain the path '/secret/test', got: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "update") {
+		t.Errorf("Expected log output to contain the operation 'update', got: %s", logOutput)
+	}
+}
