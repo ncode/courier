@@ -66,6 +66,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.courier.yaml)")
 	rootCmd.PersistentFlags().String("vault.source.address", "http://127.0.0.1:8200", "Vault source address")
 	rootCmd.PersistentFlags().String("vault.source.token", "", "Vault source token")
+	rootCmd.PersistentFlags().String("vault.destination.address", "http://127.0.0.1:8200", "Vault source address")
+	rootCmd.PersistentFlags().String("vault.destination.token", "", "Vault source token")
 	rootCmd.PersistentFlags().String("vault.audit_path", "/courier", "Vault audit path")
 	rootCmd.PersistentFlags().String("vault.audit_address", "127.0.0.1:1269", "Courier audit device address to receive the audit")
 	rootCmd.PersistentFlags().String("vault.audit_description", "Courier audit device", "Vault audit description")
@@ -93,6 +95,8 @@ func initConfig() {
 
 	viper.BindPFlag("vault.source.address", rootCmd.PersistentFlags().Lookup("vault.source.address"))
 	viper.BindPFlag("vault.source.token", rootCmd.PersistentFlags().Lookup("vault.source.token"))
+	viper.BindPFlag("vault.destination.address", rootCmd.PersistentFlags().Lookup("vault.destination.address"))
+	viper.BindPFlag("vault.destination.token", rootCmd.PersistentFlags().Lookup("vault.destination.token"))
 	viper.BindPFlag("vault.audit_path", rootCmd.PersistentFlags().Lookup("vault.audit_path"))
 	viper.BindPFlag("vault.audit_address", rootCmd.PersistentFlags().Lookup("vault.audit_address"))
 	viper.BindPFlag("vault.audit_description", rootCmd.PersistentFlags().Lookup("vault.audit_description"))

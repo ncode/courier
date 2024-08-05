@@ -31,13 +31,10 @@ import (
 // auditServerCmd represents the auditServer command
 var auditServerCmd = &cobra.Command{
 	Use:   "auditServer",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
+	Short: "Starts the audit server that listens for audit messages from Vault.",
+	Long: `Starts the audit server that listens for audit messages from Vault.
 
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
+The audit server listens for audit messages from Vault, based on the metadata of the path messages will be published to the appropriate channels.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		addr := fmt.Sprintf("udp://%s", viper.GetString("vault.audit_address"))
 
