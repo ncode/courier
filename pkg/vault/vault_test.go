@@ -7,6 +7,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -196,6 +197,30 @@ func TestNewVaultClient(t *testing.T) {
 					w.WriteHeader(http.StatusUnauthorized)
 					w.Write([]byte(`{"errors": ["invalid Kubernetes credentials"]}`))
 				})
+			},
+			wantErr: true,
+		},
+		{
+			name:       "Fail to create Vault client",
+			authMethod: TokenAuth{Token: "test-token"},
+			setupMock: func(s *httptest.Server) {
+				s.Close() // Close the server to simulate a connection error
+			},
+			wantErr: true,
+		},
+		{
+			name: "Fail to configure TLS",
+			authMethod: &mockCertAuth{
+				CertAuth: CertAuth{
+					CertFile: "test-cert.pem",
+					KeyFile:  "test-key.pem",
+				},
+				mockConfigureTLS: func(config *vault.Config) error {
+					return errors.New("TLS config failed")
+				},
+			},
+			setupMock: func(s *httptest.Server) {
+				// No setup needed, the error will come from TLS configuration
 			},
 			wantErr: true,
 		},
@@ -527,4 +552,18 @@ func TestCertAuth_ConfigureTLS(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Mock AuthMethod for testing
+type mockAuthMethod struct {
+	configureTLSFunc func(*vault.Config) error
+	authenticateFunc func(*vault.Client) error
+}
+
+func (m *mockAuthMethod) ConfigureTLS(config *vault.Config) error {
+	return m.configureTLSFunc(config)
+}
+
+func (m *mockAuthMethod) Authenticate(client *vault.Client) error {
+	return m.authenticateFunc(client)
 }
