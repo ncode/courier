@@ -1,10 +1,19 @@
 package vault
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	vault "github.com/hashicorp/vault/api"
 	"github.com/stretchr/testify/assert"
@@ -402,6 +411,119 @@ func TestVaultClient_Operations(t *testing.T) {
 				if tt.checkResult != nil {
 					tt.checkResult(t, result)
 				}
+			}
+		})
+	}
+}
+
+func generateCert(certPath, keyPath string) error {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return err
+	}
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Test Co"},
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(time.Hour * 24 * 180),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return err
+	}
+
+	certOut, err := os.Create(certPath)
+	if err != nil {
+		return err
+	}
+	pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	certOut.Close()
+
+	keyOut, err := os.Create(keyPath)
+	if err != nil {
+		return err
+	}
+	pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
+	keyOut.Close()
+
+	return nil
+}
+
+func TestCertAuth_ConfigureTLS(t *testing.T) {
+	tempDir := t.TempDir()
+	validCert := filepath.Join(tempDir, "valid-cert.pem")
+	validKey := filepath.Join(tempDir, "valid-key.pem")
+	invalidCert := filepath.Join(tempDir, "invalid-cert.pem")
+	invalidKey := filepath.Join(tempDir, "invalid-key.pem")
+
+	err := generateCert(validCert, validKey)
+	assert.NoError(t, err)
+
+	err = os.WriteFile(invalidCert, []byte("invalid cert"), 0644)
+	assert.NoError(t, err)
+	err = os.WriteFile(invalidKey, []byte("invalid key"), 0644)
+	assert.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		certFile    string
+		keyFile     string
+		expectError bool
+	}{
+		{
+			name:        "Valid Certificate and Key",
+			certFile:    validCert,
+			keyFile:     validKey,
+			expectError: false,
+		},
+		{
+			name:        "Invalid Certificate",
+			certFile:    invalidCert,
+			keyFile:     validKey,
+			expectError: true,
+		},
+		{
+			name:        "Invalid Key",
+			certFile:    validCert,
+			keyFile:     invalidKey,
+			expectError: true,
+		},
+		{
+			name:        "Missing Certificate",
+			certFile:    filepath.Join(tempDir, "nonexistent-cert.pem"),
+			keyFile:     validKey,
+			expectError: true,
+		},
+		{
+			name:        "Missing Key",
+			certFile:    validCert,
+			keyFile:     filepath.Join(tempDir, "nonexistent-key.pem"),
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			certAuth := CertAuth{
+				CertFile: tt.certFile,
+				KeyFile:  tt.keyFile,
+			}
+
+			config := vault.DefaultConfig()
+			err := certAuth.ConfigureTLS(config)
+
+			if tt.expectError {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "failed to configure TLS")
+			} else {
+				assert.NoError(t, err)
 			}
 		})
 	}
