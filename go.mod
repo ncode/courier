@@ -8,7 +8,7 @@ require (
 	github.com/hashicorp/vault/api v1.22.0
 	github.com/panjf2000/gnet v1.6.7
 	github.com/panjf2000/gnet/v2 v2.9.7
-	github.com/redis/go-redis/v9 v9.6.1
+	github.com/redis/go-redis/v9 v9.17.2
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/viper v1.18.2
 	github.com/stretchr/testify v1.10.0
@@ -16,7 +16,7 @@ require (
 
 require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
-	github.com/cespare/xxhash/v2 v2.2.0 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/go-redis/redismock/v9 v9.2.0 // indirect
 	github.com/tidwall/btree v1.1.0 // indirect
