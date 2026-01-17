@@ -5,6 +5,7 @@ go 1.25.5
 require (
 	github.com/hashicorp/vault/api v1.22.0
 	github.com/panjf2000/gnet v1.6.7
+	github.com/panjf2000/gnet/v2 v2.9.7
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
