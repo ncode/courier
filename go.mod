@@ -4,8 +4,7 @@ go 1.25.5
 
 require (
 	github.com/hashicorp/vault/api v1.22.0
-	github.com/panjf2000/gnet v1.6.7
-	github.com/panjf2000/gnet/v2 v2.9.7
+	github.com/panjf2000/gnet/v2 v2.6.3
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
@@ -21,6 +20,7 @@ require (
 	github.com/tidwall/btree v1.8.1 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
+	golang.org/x/sync v0.19.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
 )
 

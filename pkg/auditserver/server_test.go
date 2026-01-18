@@ -3,42 +3,86 @@ package auditserver
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/panjf2000/gnet"
-	"github.com/redis/go-redis/v9"
 	"io"
 	"log/slog"
 	"net"
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/panjf2000/gnet/v2"
+	"github.com/redis/go-redis/v9"
 )
 
-// mockConn is a mock implementation of gnet.Conn
-type mockConn struct{}
+// mockConn is a mock implementation of gnet.Conn for v2
+type mockConn struct {
+	buf *bytes.Buffer
+}
 
-func (m *mockConn) Read() []byte                        { return nil }
-func (m *mockConn) ReadN(n int) (int, []byte)           { return 0, nil }
-func (m *mockConn) Write(b []byte) (n int, err error)   { return 0, nil }
-func (m *mockConn) Close() error                        { return nil }
-func (m *mockConn) LocalAddr() net.Addr                 { return nil }
-func (m *mockConn) RemoteAddr() net.Addr                { return nil }
-func (m *mockConn) Context() interface{}                { return nil }
-func (m *mockConn) SetContext(ctx interface{})          {}
-func (m *mockConn) Wake() error                         { return nil }
-func (m *mockConn) ResetBuffer()                        {}
-func (m *mockConn) ReadBytes() []byte                   { return nil }
-func (m *mockConn) ShiftN(n int) (size int)             { return 0 }
-func (m *mockConn) InboundBuffer() *bytes.Buffer        { return nil }
-func (m *mockConn) OutboundBuffer() *bytes.Buffer       { return nil }
-func (m *mockConn) AsyncWrite(buf []byte) (err error)   { return nil }
-func (m *mockConn) AsyncWritev(bs [][]byte) (err error) { return nil }
-func (m *mockConn) SendTo(buf []byte) (err error)       { return nil }
-func (m *mockConn) WriteFrame(buf []byte) (err error)   { return nil }
-func (m *mockConn) BufferLength() int                   { return 0 }
-func (m *mockConn) Peek(n int) (buf []byte, err error)  { return nil, nil }
-func (m *mockConn) Next(n int) (buf []byte, err error)  { return nil, nil }
+func newMockConn(data []byte) *mockConn {
+	return &mockConn{buf: bytes.NewBuffer(data)}
+}
 
-func TestAuditServer_React(t *testing.T) {
+// Reader interface
+func (m *mockConn) Read(p []byte) (n int, err error)         { return m.buf.Read(p) }
+func (m *mockConn) WriteTo(w io.Writer) (n int64, err error) { return m.buf.WriteTo(w) }
+func (m *mockConn) Next(n int) ([]byte, error) {
+	if n < 0 || n > m.buf.Len() {
+		n = m.buf.Len()
+	}
+	data := make([]byte, n)
+	_, err := m.buf.Read(data)
+	return data, err
+}
+func (m *mockConn) Peek(n int) ([]byte, error) {
+	if n < 0 || n > m.buf.Len() {
+		n = m.buf.Len()
+	}
+	return m.buf.Bytes()[:n], nil
+}
+func (m *mockConn) Discard(n int) (int, error) {
+	if n < 0 || n > m.buf.Len() {
+		n = m.buf.Len()
+	}
+	m.buf.Next(n)
+	return n, nil
+}
+func (m *mockConn) InboundBuffered() int { return m.buf.Len() }
+
+// Writer interface
+func (m *mockConn) Write(p []byte) (n int, err error)                    { return len(p), nil }
+func (m *mockConn) ReadFrom(r io.Reader) (n int64, err error)            { return 0, nil }
+func (m *mockConn) SendTo(buf []byte, addr net.Addr) (int, error)        { return len(buf), nil }
+func (m *mockConn) Writev(bs [][]byte) (int, error)                      { return 0, nil }
+func (m *mockConn) Flush() error                                         { return nil }
+func (m *mockConn) OutboundBuffered() int                                { return 0 }
+func (m *mockConn) AsyncWrite(buf []byte, cb gnet.AsyncCallback) error   { return nil }
+func (m *mockConn) AsyncWritev(bs [][]byte, cb gnet.AsyncCallback) error { return nil }
+
+// Socket interface
+func (m *mockConn) Fd() int                                                              { return 0 }
+func (m *mockConn) Dup() (int, error)                                                    { return 0, nil }
+func (m *mockConn) SetReadBuffer(size int) error                                         { return nil }
+func (m *mockConn) SetWriteBuffer(size int) error                                        { return nil }
+func (m *mockConn) SetLinger(secs int) error                                             { return nil }
+func (m *mockConn) SetKeepAlivePeriod(d time.Duration) error                             { return nil }
+func (m *mockConn) SetKeepAlive(enabled bool, idle, intvl time.Duration, cnt int) error  { return nil }
+func (m *mockConn) SetNoDelay(noDelay bool) error                                        { return nil }
+
+// Conn interface
+func (m *mockConn) Context() any                                  { return nil }
+func (m *mockConn) SetContext(ctx any)                            {}
+func (m *mockConn) LocalAddr() net.Addr                           { return nil }
+func (m *mockConn) RemoteAddr() net.Addr                          { return nil }
+func (m *mockConn) Wake(cb gnet.AsyncCallback) error              { return nil }
+func (m *mockConn) CloseWithCallback(cb gnet.AsyncCallback) error { return nil }
+func (m *mockConn) Close() error                                  { return nil }
+func (m *mockConn) SetDeadline(t time.Time) error                 { return nil }
+func (m *mockConn) SetReadDeadline(t time.Time) error             { return nil }
+func (m *mockConn) SetWriteDeadline(t time.Time) error            { return nil }
+
+func TestAuditServer_OnTraffic(t *testing.T) {
 	tests := []struct {
 		name           string
 		input          AuditLog
@@ -174,7 +218,7 @@ func TestAuditServer_React(t *testing.T) {
 				t.Fatalf("Failed to marshal input: %v", err)
 			}
 
-			_, action := server.React(inputJSON, &mockConn{})
+			action := server.OnTraffic(newMockConn(inputJSON))
 
 			t.Logf("Test case: %s", tt.name)
 			t.Logf("Input: %s", string(inputJSON))
@@ -231,19 +275,19 @@ func TestNew(t *testing.T) {
 	}
 }
 
-func TestAuditServer_React_InvalidJSON(t *testing.T) {
+func TestAuditServer_OnTraffic_InvalidJSON(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	server := New(logger, nil)
 
 	invalidJSON := []byte(`{"invalid": json}`)
-	_, action := server.React(invalidJSON, &mockConn{})
+	action := server.OnTraffic(newMockConn(invalidJSON))
 
 	if action != gnet.Close {
 		t.Errorf("Expected gnet.Close action for invalid JSON, got %v", action)
 	}
 }
 
-func TestAuditServer_React_NonRelevantOperations(t *testing.T) {
+func TestAuditServer_OnTraffic_NonRelevantOperations(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	server := New(logger, nil)
 
@@ -265,7 +309,7 @@ func TestAuditServer_React_NonRelevantOperations(t *testing.T) {
 		}
 
 		inputJSON, _ := json.Marshal(input)
-		_, action := server.React(inputJSON, &mockConn{})
+		action := server.OnTraffic(newMockConn(inputJSON))
 
 		if action != gnet.Close {
 			t.Errorf("Expected gnet.Close action for non-relevant operation %s, got %v", op, action)
@@ -273,7 +317,7 @@ func TestAuditServer_React_NonRelevantOperations(t *testing.T) {
 	}
 }
 
-func TestAuditServer_React_LoggingBehavior(t *testing.T) {
+func TestAuditServer_OnTraffic_LoggingBehavior(t *testing.T) {
 	var logBuffer bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	server := New(logger, nil)
@@ -295,7 +339,7 @@ func TestAuditServer_React_LoggingBehavior(t *testing.T) {
 	}
 
 	inputJSON, _ := json.Marshal(validInput)
-	server.React(inputJSON, &mockConn{})
+	server.OnTraffic(newMockConn(inputJSON))
 
 	logOutput := logBuffer.String()
 	if !strings.Contains(logOutput, "Received audit log") {
@@ -309,7 +353,7 @@ func TestAuditServer_React_LoggingBehavior(t *testing.T) {
 	}
 }
 
-func TestAuditServer_React_JSONParseError(t *testing.T) {
+func TestAuditServer_OnTraffic_JSONParseError(t *testing.T) {
 	var logBuffer bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelError}))
 	server := New(logger, nil)
@@ -317,7 +361,7 @@ func TestAuditServer_React_JSONParseError(t *testing.T) {
 	// Create an input that will pass the initial checks but fail JSON unmarshaling
 	invalidInput := []byte(`{"auth":{"policy_results":{"allowed":true}},"request":{"mount_type":"kv","operation":"update"},"response":{"mount_type":"kv"},"invalid_json":}`)
 
-	_, action := server.React(invalidInput, &mockConn{})
+	action := server.OnTraffic(newMockConn(invalidInput))
 
 	// Check that the action is gnet.Close
 	if action != gnet.Close {

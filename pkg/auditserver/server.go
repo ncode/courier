@@ -3,10 +3,11 @@ package auditserver
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/panjf2000/gnet"
-	"github.com/redis/go-redis/v9"
 	"log/slog"
 	"os"
+
+	"github.com/panjf2000/gnet/v2"
+	"github.com/redis/go-redis/v9"
 )
 
 var (
@@ -54,32 +55,34 @@ type AuditLog struct {
 }
 
 type AuditServer struct {
-	*gnet.EventServer
+	gnet.BuiltinEventEngine
 	logger    *slog.Logger
 	publisher *redis.Client
 }
 
-func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet.Action) {
+func (as *AuditServer) OnTraffic(c gnet.Conn) gnet.Action {
+	frame, _ := c.Next(-1)
+
 	if !bytes.Contains(frame, mountTypeKV) {
 		// Skip events that are not kv, we only care about kv at the moment
-		return nil, gnet.Close
+		return gnet.Close
 	}
 
 	if !bytes.Contains(frame, allowedPolicy) {
 		// Skip events that are not allowed
-		return nil, gnet.Close
+		return gnet.Close
 	}
 
 	if !bytes.Contains(frame, operationUpdate) && !bytes.Contains(frame, operationCreate) && !bytes.Contains(frame, operationDelete) {
 		// Skip events that are not relevant for courier
-		return nil, gnet.Close
+		return gnet.Close
 	}
 
 	var auditLog AuditLog
 	err := json.Unmarshal(frame, &auditLog)
 	if err != nil {
 		as.logger.Error("Error parsing audit log", "error", err)
-		return nil, gnet.Close
+		return gnet.Close
 	}
 
 	if auditLog.Auth.PolicyResults.Allowed == true && auditLog.Response.MountType == "kv" {
@@ -90,7 +93,7 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 		as.logger.Info("Received audit log", logAttrs...)
 	}
 
-	return
+	return gnet.None
 }
 
 func New(logger *slog.Logger, publisher *redis.Client) *AuditServer {
