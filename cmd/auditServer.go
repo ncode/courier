@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"github.com/ncode/courier/pkg/auditserver"
 	"github.com/ncode/courier/pkg/broker"
-	"github.com/panjf2000/gnet"
+	"github.com/panjf2000/gnet/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/viper"
 	"log"
@@ -68,7 +68,7 @@ The audit server listens for audit messages from Vault, based on the metadata of
 		}
 
 		server := auditserver.New(nil, redisClient)
-		log.Fatal(gnet.Serve(server, addr, gnet.WithMulticore(true)))
+		log.Fatal(gnet.Run(server, addr, gnet.WithMulticore(true)))
 	},
 }
 
