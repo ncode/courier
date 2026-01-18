@@ -45,6 +45,10 @@ docker exec -e VAULT_ADDR=http://vault-dest-1:8200 -e VAULT_TOKEN=root vault-des
 docker exec -e VAULT_ADDR=http://vault-dest-2:8200 -e VAULT_TOKEN=root vault-dest-2 \
   vault kv get -format=json secret/data/demo
 ```
+Validation notes:
+- `go test -race ./...` (race-free)
+- Dev stack propagation confirmed with the commands above.
+
 Tear down:
 ```bash
 docker compose -f configs/docker/docker-compose.dev.yml down

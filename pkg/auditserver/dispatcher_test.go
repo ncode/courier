@@ -12,14 +12,17 @@ func TestDispatcher_DedupWhilePending(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	callCh := make(chan string, 2)
-	blocker := make(chan struct{})
+	releaseCh := make(chan chan struct{}, 4)
 
 	dispatcher := NewDispatcher(logger, func(event UpdateEvent) error {
 		callCh <- string(event.Kind) + ":" + event.Path + ":" + event.Operation
-		<-blocker
+		release := <-releaseCh
+		<-release
 		return nil
 	}, 1, 1)
 
+	firstRelease := make(chan struct{})
+	releaseCh <- firstRelease
 	dispatcher.Enqueue(UpdateEvent{Kind: UpdateKindKV, Path: "secret/foo", Operation: "create"})
 
 	select {
@@ -36,10 +39,11 @@ func TestDispatcher_DedupWhilePending(t *testing.T) {
 	case <-time.After(25 * time.Millisecond):
 	}
 
-	close(blocker)
-	time.Sleep(10 * time.Millisecond)
+	close(firstRelease)
+	time.Sleep(20 * time.Millisecond)
 
-	blocker = make(chan struct{})
+	secondRelease := make(chan struct{})
+	releaseCh <- secondRelease
 	dispatcher.Enqueue(UpdateEvent{Kind: UpdateKindKV, Path: "secret/foo", Operation: "update"})
 
 	select {
@@ -48,7 +52,7 @@ func TestDispatcher_DedupWhilePending(t *testing.T) {
 		t.Fatalf("expected worker to start after pending cleared")
 	}
 
-	close(blocker)
+	close(secondRelease)
 }
 
 func TestDispatcher_ConcurrentDistinctPaths(t *testing.T) {

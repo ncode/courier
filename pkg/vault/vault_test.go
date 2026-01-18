@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -228,7 +229,7 @@ func TestNewVaultClient(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := newTCP4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				// This default handler should never be called
 				t.Errorf("Unexpected request to %s", r.URL.Path)
 				w.WriteHeader(http.StatusInternalServerError)
@@ -262,6 +263,19 @@ func TestNewVaultClient(t *testing.T) {
 			}
 		})
 	}
+}
+
+func newTCP4Server(t *testing.T, handler http.Handler) *httptest.Server {
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("skipping test: cannot listen on tcp4 loopback: %v", err)
+	}
+	server := &httptest.Server{
+		Listener: l,
+		Config:   &http.Server{Handler: handler},
+	}
+	server.Start()
+	return server
 }
 
 func TestVaultClient_Operations(t *testing.T) {
@@ -493,7 +507,7 @@ func TestVaultClient_Operations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(tt.setupMock))
+			server := newTCP4Server(t, http.HandlerFunc(tt.setupMock))
 			defer server.Close()
 
 			client, _ := vault.NewClient(&vault.Config{Address: server.URL})

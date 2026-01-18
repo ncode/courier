@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,35 @@ type mockConn struct {
 
 func newMockConn(data []byte) *mockConn {
 	return &mockConn{buf: bytes.NewBuffer(data)}
+}
+
+type safeBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *safeBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func (s *safeBuffer) Bytes() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.b.Bytes()...)
+}
+
+func (s *safeBuffer) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Len()
 }
 
 // Reader interface
@@ -207,8 +237,8 @@ func TestAuditServer_OnTraffic(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var logBuffer bytes.Buffer
-			logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelInfo}))
+			logBuffer := &safeBuffer{}
+			logger := slog.New(slog.NewJSONHandler(logBuffer, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 			server := New(logger, nil)
 
@@ -314,8 +344,8 @@ func TestAuditServer_OnTraffic_NonRelevantOperations(t *testing.T) {
 }
 
 func TestAuditServer_OnTraffic_LoggingBehavior(t *testing.T) {
-	var logBuffer bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logBuffer := &safeBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuffer, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	server := New(logger, nil)
 
 	validInput := AuditLog{
@@ -350,8 +380,8 @@ func TestAuditServer_OnTraffic_LoggingBehavior(t *testing.T) {
 }
 
 func TestAuditServer_OnTraffic_JSONParseError(t *testing.T) {
-	var logBuffer bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelError}))
+	logBuffer := &safeBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuffer, &slog.HandlerOptions{Level: slog.LevelError}))
 	server := New(logger, nil)
 
 	// Create an input that will pass the initial checks but fail JSON unmarshaling
