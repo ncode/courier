@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -8,17 +9,19 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
+	"io"
 	"math/big"
-	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	vault "github.com/hashicorp/vault/api"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type mockCertAuth struct {
@@ -31,28 +34,58 @@ func (m *mockCertAuth) ConfigureTLS(config *vault.Config) error {
 	return m.mockConfigureTLS(config)
 }
 
+type roundTripperFunc func(*http.Request) *http.Response
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp := f(req)
+	if resp == nil {
+		return nil, fmt.Errorf("no response provided for %s", req.URL.Path)
+	}
+	resp.Request = req
+	if resp.Body == nil {
+		resp.Body = io.NopCloser(bytes.NewBuffer(nil))
+	}
+	if resp.Header == nil {
+		resp.Header = make(http.Header)
+	}
+	return resp, nil
+}
+
+func response(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+	}
+}
+
+func newTestVaultClient(t *testing.T, transport http.RoundTripper) *vault.Client {
+	t.Helper()
+	cfg := vault.DefaultConfig()
+	cfg.Address = "http://vault.test"
+	cfg.HttpClient = &http.Client{Transport: transport}
+	client, err := vault.NewClient(cfg)
+	require.NoError(t, err)
+	client.SetToken("test-token")
+	return client
+}
+
 func TestNewVaultClient(t *testing.T) {
 	tests := []struct {
 		name       string
 		authMethod AuthMethod
-		setupMock  func(*httptest.Server)
+		transport  http.RoundTripper
+		address    string
 		wantErr    bool
 	}{
 		{
 			name:       "TokenAuth_Success",
 			authMethod: TokenAuth{Token: "test-token"},
-			setupMock: func(s *httptest.Server) {
-				s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					assert.Equal(t, "test-token", r.Header.Get("X-Vault-Token"))
-					if r.URL.Path == "/v1/auth/token/lookup-self" {
-						w.WriteHeader(http.StatusOK)
-						w.Write([]byte(`{"data": {"id": "test-token"}}`))
-					} else {
-						w.WriteHeader(http.StatusOK)
-					}
-				})
-			},
-			wantErr: false,
+			transport: roundTripperFunc(func(r *http.Request) *http.Response {
+				assert.Equal(t, "test-token", r.Header.Get("X-Vault-Token"))
+				assert.Equal(t, "/v1/auth/token/lookup-self", r.URL.Path)
+				return response(http.StatusOK, `{"data": {"id": "test-token"}}`)
+			}),
 		},
 		{
 			name: "AppRoleAuth_Success",
@@ -60,35 +93,32 @@ func TestNewVaultClient(t *testing.T) {
 				RoleID:   "test-role-id",
 				SecretID: "test-secret-id",
 			},
-			setupMock: func(s *httptest.Server) {
-				s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					assert.Equal(t, "/v1/auth/approle/login", r.URL.Path)
-					assert.Equal(t, http.MethodPut, r.Method)
-					var payload map[string]interface{}
-					json.NewDecoder(r.Body).Decode(&payload)
-					assert.Equal(t, "test-role-id", payload["role_id"])
-					assert.Equal(t, "test-secret-id", payload["secret_id"])
-					w.WriteHeader(http.StatusOK)
-					w.Write([]byte(`{"auth": {"client_token": "test-client-token"}}`))
-				})
-			},
-			wantErr: false,
+			transport: roundTripperFunc(func(r *http.Request) *http.Response {
+				assert.Equal(t, "/v1/auth/approle/login", r.URL.Path)
+				assert.Equal(t, http.MethodPut, r.Method)
+				var payload map[string]interface{}
+				json.NewDecoder(r.Body).Decode(&payload)
+				assert.Equal(t, "test-role-id", payload["role_id"])
+				assert.Equal(t, "test-secret-id", payload["secret_id"])
+				return response(http.StatusOK, `{"auth": {"client_token": "test-client-token"}}`)
+			}),
 		},
 		{
 			name: "CertAuth_Success",
-			authMethod: CertAuth{
-				CertFile: "test-cert.pem",
-				KeyFile:  "test-key.pem",
+			authMethod: &mockCertAuth{
+				CertAuth: CertAuth{
+					CertFile: "test-cert.pem",
+					KeyFile:  "test-key.pem",
+				},
+				mockConfigureTLS: func(config *vault.Config) error {
+					return nil
+				},
 			},
-			setupMock: func(s *httptest.Server) {
-				s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					assert.Equal(t, "/v1/auth/cert/login", r.URL.Path)
-					assert.Equal(t, http.MethodPut, r.Method)
-					w.WriteHeader(http.StatusOK)
-					w.Write([]byte(`{"auth": {"client_token": "test-client-token"}}`))
-				})
-			},
-			wantErr: false,
+			transport: roundTripperFunc(func(r *http.Request) *http.Response {
+				assert.Equal(t, "/v1/auth/cert/login", r.URL.Path)
+				assert.Equal(t, http.MethodPut, r.Method)
+				return response(http.StatusOK, `{"auth": {"client_token": "test-client-token"}}`)
+			}),
 		},
 		{
 			name: "JWTAuth_Success",
@@ -96,19 +126,15 @@ func TestNewVaultClient(t *testing.T) {
 				Role: "test-role",
 				JWT:  "test-jwt",
 			},
-			setupMock: func(s *httptest.Server) {
-				s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					assert.Equal(t, "/v1/auth/jwt/login", r.URL.Path)
-					assert.Equal(t, http.MethodPut, r.Method)
-					var payload map[string]interface{}
-					json.NewDecoder(r.Body).Decode(&payload)
-					assert.Equal(t, "test-role", payload["role"])
-					assert.Equal(t, "test-jwt", payload["jwt"])
-					w.WriteHeader(http.StatusOK)
-					w.Write([]byte(`{"auth": {"client_token": "test-client-token"}}`))
-				})
-			},
-			wantErr: false,
+			transport: roundTripperFunc(func(r *http.Request) *http.Response {
+				assert.Equal(t, "/v1/auth/jwt/login", r.URL.Path)
+				assert.Equal(t, http.MethodPut, r.Method)
+				var payload map[string]interface{}
+				json.NewDecoder(r.Body).Decode(&payload)
+				assert.Equal(t, "test-role", payload["role"])
+				assert.Equal(t, "test-jwt", payload["jwt"])
+				return response(http.StatusOK, `{"auth": {"client_token": "test-client-token"}}`)
+			}),
 		},
 		{
 			name: "K8sAuth_Success",
@@ -116,33 +142,23 @@ func TestNewVaultClient(t *testing.T) {
 				Role: "test-role",
 				JWT:  "test-jwt",
 			},
-			setupMock: func(s *httptest.Server) {
-				s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					assert.Equal(t, "/v1/auth/kubernetes/login", r.URL.Path)
-					assert.Equal(t, http.MethodPut, r.Method)
-					var payload map[string]interface{}
-					json.NewDecoder(r.Body).Decode(&payload)
-					assert.Equal(t, "test-role", payload["role"])
-					assert.Equal(t, "test-jwt", payload["jwt"])
-					w.WriteHeader(http.StatusOK)
-					w.Write([]byte(`{"auth": {"client_token": "test-client-token"}}`))
-				})
-			},
-			wantErr: false,
+			transport: roundTripperFunc(func(r *http.Request) *http.Response {
+				assert.Equal(t, "/v1/auth/kubernetes/login", r.URL.Path)
+				assert.Equal(t, http.MethodPut, r.Method)
+				var payload map[string]interface{}
+				json.NewDecoder(r.Body).Decode(&payload)
+				assert.Equal(t, "test-role", payload["role"])
+				assert.Equal(t, "test-jwt", payload["jwt"])
+				return response(http.StatusOK, `{"auth": {"client_token": "test-client-token"}}`)
+			}),
 		},
 		{
 			name:       "TokenAuth_Failure",
 			authMethod: TokenAuth{Token: "invalid-token"},
-			setupMock: func(s *httptest.Server) {
-				s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.URL.Path == "/v1/auth/token/lookup-self" {
-						w.WriteHeader(http.StatusForbidden)
-						w.Write([]byte(`{"errors": ["invalid token"]}`))
-					} else {
-						w.WriteHeader(http.StatusForbidden)
-					}
-				})
-			},
+			transport: roundTripperFunc(func(r *http.Request) *http.Response {
+				assert.Equal(t, "/v1/auth/token/lookup-self", r.URL.Path)
+				return response(http.StatusForbidden, `{"errors": ["invalid token"]}`)
+			}),
 			wantErr: true,
 		},
 		{
@@ -151,26 +167,25 @@ func TestNewVaultClient(t *testing.T) {
 				RoleID:   "invalid-role-id",
 				SecretID: "invalid-secret-id",
 			},
-			setupMock: func(s *httptest.Server) {
-				s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusBadRequest)
-					w.Write([]byte(`{"errors": ["invalid AppRole credentials"]}`))
-				})
-			},
+			transport: roundTripperFunc(func(r *http.Request) *http.Response {
+				return response(http.StatusBadRequest, `{"errors": ["invalid AppRole credentials"]}`)
+			}),
 			wantErr: true,
 		},
 		{
 			name: "CertAuth_Failure",
-			authMethod: CertAuth{
-				CertFile: "invalid-cert.pem",
-				KeyFile:  "invalid-key.pem",
+			authMethod: &mockCertAuth{
+				CertAuth: CertAuth{
+					CertFile: "invalid-cert.pem",
+					KeyFile:  "invalid-key.pem",
+				},
+				mockConfigureTLS: func(config *vault.Config) error {
+					return nil
+				},
 			},
-			setupMock: func(s *httptest.Server) {
-				s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusUnauthorized)
-					w.Write([]byte(`{"errors": ["invalid certificate"]}`))
-				})
-			},
+			transport: roundTripperFunc(func(r *http.Request) *http.Response {
+				return response(http.StatusUnauthorized, `{"errors": ["invalid certificate"]}`)
+			}),
 			wantErr: true,
 		},
 		{
@@ -179,12 +194,9 @@ func TestNewVaultClient(t *testing.T) {
 				Role: "invalid-role",
 				JWT:  "invalid-jwt",
 			},
-			setupMock: func(s *httptest.Server) {
-				s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusUnauthorized)
-					w.Write([]byte(`{"errors": ["invalid JWT"]}`))
-				})
-			},
+			transport: roundTripperFunc(func(r *http.Request) *http.Response {
+				return response(http.StatusUnauthorized, `{"errors": ["invalid JWT"]}`)
+			}),
 			wantErr: true,
 		},
 		{
@@ -193,20 +205,18 @@ func TestNewVaultClient(t *testing.T) {
 				Role: "invalid-role",
 				JWT:  "invalid-jwt",
 			},
-			setupMock: func(s *httptest.Server) {
-				s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusUnauthorized)
-					w.Write([]byte(`{"errors": ["invalid Kubernetes credentials"]}`))
-				})
-			},
+			transport: roundTripperFunc(func(r *http.Request) *http.Response {
+				return response(http.StatusUnauthorized, `{"errors": ["invalid Kubernetes credentials"]}`)
+			}),
 			wantErr: true,
 		},
 		{
 			name:       "Fail to create Vault client",
 			authMethod: TokenAuth{Token: "test-token"},
-			setupMock: func(s *httptest.Server) {
-				s.Close() // Close the server to simulate a connection error
-			},
+			address:    "://bad-address",
+			transport: roundTripperFunc(func(r *http.Request) *http.Response {
+				return response(http.StatusOK, `{}`)
+			}),
 			wantErr: true,
 		},
 		{
@@ -220,40 +230,27 @@ func TestNewVaultClient(t *testing.T) {
 					return errors.New("TLS config failed")
 				},
 			},
-			setupMock: func(s *httptest.Server) {
-				// No setup needed, the error will come from TLS configuration
-			},
+			transport: roundTripperFunc(func(r *http.Request) *http.Response {
+				return response(http.StatusOK, `{}`)
+			}),
 			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := newTCP4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// This default handler should never be called
-				t.Errorf("Unexpected request to %s", r.URL.Path)
-				w.WriteHeader(http.StatusInternalServerError)
-			}))
-			defer server.Close()
-
-			// Apply the test-specific mock
-			tt.setupMock(server)
-
-			// Create a copy of the auth method to avoid modifying the original
-			authMethod := tt.authMethod
-
-			// Mock the TLS configuration for CertAuth
-			if certAuth, ok := authMethod.(CertAuth); ok {
-				authMethod = &mockCertAuth{
-					CertAuth: certAuth,
-					mockConfigureTLS: func(config *vault.Config) error {
-						// Do nothing for the test
-						return nil
-					},
-				}
+			transport := tt.transport
+			if transport == nil {
+				transport = roundTripperFunc(func(r *http.Request) *http.Response {
+					return response(http.StatusOK, `{}`)
+				})
+			}
+			addr := tt.address
+			if addr == "" {
+				addr = "http://vault.test"
 			}
 
-			client, err := NewVaultClient(server.URL, authMethod)
+			client, err := NewVaultClient(addr, tt.authMethod, WithHTTPClient(&http.Client{Transport: transport}))
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Nil(t, client)
@@ -265,26 +262,13 @@ func TestNewVaultClient(t *testing.T) {
 	}
 }
 
-func newTCP4Server(t *testing.T, handler http.Handler) *httptest.Server {
-	l, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Skipf("skipping test: cannot listen on tcp4 loopback: %v", err)
-	}
-	server := &httptest.Server{
-		Listener: l,
-		Config:   &http.Server{Handler: handler},
-	}
-	server.Start()
-	return server
-}
-
 func TestVaultClient_Operations(t *testing.T) {
 	tests := []struct {
 		name        string
 		operation   string
 		path        string
 		input       map[string]interface{}
-		setupMock   func(w http.ResponseWriter, r *http.Request)
+		handler     func(t *testing.T, r *http.Request) *http.Response
 		expectedErr bool
 		checkResult func(t *testing.T, result interface{})
 		checkError  func(t *testing.T, err error)
@@ -293,11 +277,10 @@ func TestVaultClient_Operations(t *testing.T) {
 			name:      "ReadSecret_Success",
 			operation: "Read",
 			path:      "secret/data/test",
-			setupMock: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(t *testing.T, r *http.Request) *http.Response {
 				assert.Equal(t, "/v1/secret/data/test", r.URL.Path)
 				assert.Equal(t, http.MethodGet, r.Method)
-				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(`{"data": {"data": {"foo": "bar"}}}`))
+				return response(http.StatusOK, `{"data": {"data": {"foo": "bar"}}}`)
 			},
 			expectedErr: false,
 			checkResult: func(t *testing.T, result interface{}) {
@@ -310,10 +293,10 @@ func TestVaultClient_Operations(t *testing.T) {
 			name:      "ReadSecret_NotFound",
 			operation: "Read",
 			path:      "secret/data/nonexistent",
-			setupMock: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(t *testing.T, r *http.Request) *http.Response {
 				assert.Equal(t, "/v1/secret/data/nonexistent", r.URL.Path)
 				assert.Equal(t, http.MethodGet, r.Method)
-				w.WriteHeader(http.StatusNotFound)
+				return response(http.StatusNotFound, `{"errors": ["not found"]}`)
 			},
 			expectedErr: true,
 		},
@@ -321,11 +304,10 @@ func TestVaultClient_Operations(t *testing.T) {
 			name:      "ReadSecret_Error",
 			operation: "Read",
 			path:      "secret/data/error",
-			setupMock: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(t *testing.T, r *http.Request) *http.Response {
 				assert.Equal(t, "/v1/secret/data/error", r.URL.Path)
 				assert.Equal(t, http.MethodGet, r.Method)
-				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(`{"errors": ["internal server error"]}`))
+				return response(http.StatusInternalServerError, `{"errors": ["internal server error"]}`)
 			},
 			expectedErr: true,
 			checkError: func(t *testing.T, err error) {
@@ -341,13 +323,13 @@ func TestVaultClient_Operations(t *testing.T) {
 			operation: "Write",
 			path:      "secret/data/test",
 			input:     map[string]interface{}{"foo": "bar"},
-			setupMock: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(t *testing.T, r *http.Request) *http.Response {
 				assert.Equal(t, "/v1/secret/data/test", r.URL.Path)
 				assert.Equal(t, http.MethodPut, r.Method)
 				var payload map[string]interface{}
 				json.NewDecoder(r.Body).Decode(&payload)
 				assert.Equal(t, map[string]interface{}{"foo": "bar"}, payload)
-				w.WriteHeader(http.StatusNoContent)
+				return response(http.StatusNoContent, `{}`)
 			},
 			expectedErr: false,
 		},
@@ -356,11 +338,10 @@ func TestVaultClient_Operations(t *testing.T) {
 			operation: "Write",
 			path:      "secret/data/test",
 			input:     map[string]interface{}{"foo": "bar"},
-			setupMock: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(t *testing.T, r *http.Request) *http.Response {
 				assert.Equal(t, "/v1/secret/data/test", r.URL.Path)
 				assert.Equal(t, http.MethodPut, r.Method)
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte(`{"errors": ["permission denied"]}`))
+				return response(http.StatusBadRequest, `{"errors": ["permission denied"]}`)
 			},
 			expectedErr: true,
 		},
@@ -368,10 +349,10 @@ func TestVaultClient_Operations(t *testing.T) {
 			name:      "DeleteSecret_Success",
 			operation: "Delete",
 			path:      "secret/data/test",
-			setupMock: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(t *testing.T, r *http.Request) *http.Response {
 				assert.Equal(t, "/v1/secret/data/test", r.URL.Path)
 				assert.Equal(t, http.MethodDelete, r.Method)
-				w.WriteHeader(http.StatusNoContent)
+				return response(http.StatusNoContent, `{}`)
 			},
 			expectedErr: false,
 		},
@@ -379,11 +360,10 @@ func TestVaultClient_Operations(t *testing.T) {
 			name:      "DeleteSecret_Failure",
 			operation: "Delete",
 			path:      "secret/data/test",
-			setupMock: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(t *testing.T, r *http.Request) *http.Response {
 				assert.Equal(t, "/v1/secret/data/test", r.URL.Path)
 				assert.Equal(t, http.MethodDelete, r.Method)
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte(`{"errors": ["permission denied"]}`))
+				return response(http.StatusBadRequest, `{"errors": ["permission denied"]}`)
 			},
 			expectedErr: true,
 		},
@@ -396,12 +376,11 @@ func TestVaultClient_Operations(t *testing.T) {
 				"description": "Test audit device",
 				"options":     map[string]string{"file_path": "/tmp/audit.log"},
 			},
-			setupMock: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(t *testing.T, r *http.Request) *http.Response {
 				switch r.URL.Path {
 				case "/v1/sys/audit":
 					assert.Equal(t, http.MethodGet, r.Method)
-					w.WriteHeader(http.StatusOK)
-					w.Write([]byte(`{"data":{}}`)) // Return a valid, but empty, JSON object
+					return response(http.StatusOK, `{"data":{}}`)
 				case "/v1/sys/audit/test-audit":
 					assert.Equal(t, http.MethodPut, r.Method)
 					var payload map[string]interface{}
@@ -409,10 +388,11 @@ func TestVaultClient_Operations(t *testing.T) {
 					assert.Equal(t, "file", payload["type"])
 					assert.Equal(t, "Test audit device", payload["description"])
 					assert.Equal(t, map[string]interface{}{"file_path": "/tmp/audit.log"}, payload["options"])
-					w.WriteHeader(http.StatusNoContent)
+					return response(http.StatusNoContent, `{}`)
 				default:
 					t.Fatalf("Unexpected request to %s", r.URL.Path)
 				}
+				return response(http.StatusInternalServerError, `{}`)
 			},
 			expectedErr: false,
 		},
@@ -425,17 +405,17 @@ func TestVaultClient_Operations(t *testing.T) {
 				"description": "Test audit device",
 				"options":     map[string]string{"file_path": "/tmp/audit.log"},
 			},
-			setupMock: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(t *testing.T, r *http.Request) *http.Response {
 				switch r.URL.Path {
 				case "/v1/sys/audit":
 					assert.Equal(t, http.MethodGet, r.Method)
-					w.WriteHeader(http.StatusOK)
-					w.Write([]byte(`{"test-audit/": {"type": "file"}}`))
+					return response(http.StatusOK, `{"test-audit/": {"type": "file"}}`)
 				case "/v1/sys/audit/test-audit":
 					t.Fatalf("Unexpected request to enable existing audit device")
 				default:
 					t.Fatalf("Unexpected request to %s", r.URL.Path)
 				}
+				return response(http.StatusInternalServerError, `{}`)
 			},
 			expectedErr: true,
 		},
@@ -448,13 +428,13 @@ func TestVaultClient_Operations(t *testing.T) {
 				"description": "Test audit device",
 				"options":     map[string]string{"file_path": "/tmp/audit.log"},
 			},
-			setupMock: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(t *testing.T, r *http.Request) *http.Response {
 				if r.URL.Path == "/v1/sys/audit" && r.Method == http.MethodGet {
-					w.WriteHeader(http.StatusInternalServerError)
-					w.Write([]byte(`{"errors": ["internal server error"]}`))
+					return response(http.StatusInternalServerError, `{"errors": ["internal server error"]}`)
 				} else {
 					t.Fatalf("Unexpected request to %s", r.URL.Path)
 				}
+				return response(http.StatusInternalServerError, `{}`)
 			},
 			expectedErr: true,
 			checkError: func(t *testing.T, err error) {
@@ -474,25 +454,24 @@ func TestVaultClient_Operations(t *testing.T) {
 				"description": "Test audit device",
 				"options":     map[string]string{"file_path": "/tmp/audit.log"},
 			},
-			setupMock: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(t *testing.T, r *http.Request) *http.Response {
 				switch r.URL.Path {
 				case "/v1/sys/audit":
 					if r.Method == http.MethodGet {
-						w.WriteHeader(http.StatusOK)
-						w.Write([]byte(`{"data":{}}`)) // Empty list of audit devices
+						return response(http.StatusOK, `{"data":{}}`)
 					} else {
 						t.Fatalf("Unexpected request to %s", r.URL.Path)
 					}
 				case "/v1/sys/audit/test-audit":
 					if r.Method == http.MethodPut {
-						w.WriteHeader(http.StatusInternalServerError)
-						w.Write([]byte(`{"errors": ["failed to enable audit device"]}`))
+						return response(http.StatusInternalServerError, `{"errors": ["failed to enable audit device"]}`)
 					} else {
 						t.Fatalf("Unexpected request to %s", r.URL.Path)
 					}
 				default:
 					t.Fatalf("Unexpected request to %s", r.URL.Path)
 				}
+				return response(http.StatusInternalServerError, `{}`)
 			},
 			expectedErr: true,
 			checkError: func(t *testing.T, err error) {
@@ -507,10 +486,9 @@ func TestVaultClient_Operations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := newTCP4Server(t, http.HandlerFunc(tt.setupMock))
-			defer server.Close()
-
-			client, _ := vault.NewClient(&vault.Config{Address: server.URL})
+			client := newTestVaultClient(t, roundTripperFunc(func(r *http.Request) *http.Response {
+				return tt.handler(t, r)
+			}))
 			vaultClient := &VaultClient{client}
 
 			var err error

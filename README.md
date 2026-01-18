@@ -75,6 +75,10 @@ Then enable a socket audit device on the source Vault pointing to the audit addr
 ## Testing
 ```bash
 go test ./...
+
+# With coverage (required >=70%)
+go test -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out
 ```
 
 ## Status / Roadmap

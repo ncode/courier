@@ -57,16 +57,9 @@ The audit server listens for audit messages from Vault, based on the metadata of
 				destTokens = append(destTokens, destTokens[0])
 			}
 		}
-		if len(destAddrs) != len(destTokens) {
-			log.Fatalf("destination addresses and tokens must have the same length")
-		}
-
-		var destConfigs []auditserver.DestinationConfig
-		for i := range destAddrs {
-			destConfigs = append(destConfigs, auditserver.DestinationConfig{
-				Address: destAddrs[i],
-				Token:   destTokens[i],
-			})
+		destConfigs, err := buildDestinationConfigs(destAddrs, destTokens)
+		if err != nil {
+			log.Fatalf("%v", err)
 		}
 
 		syncer, err := auditserver.NewVaultSyncer(logger, sourceClient, destConfigs)
@@ -107,4 +100,29 @@ func splitAndTrim(input string) []string {
 		}
 	}
 	return out
+}
+
+func buildDestinationConfigs(addresses, tokens []string) ([]auditserver.DestinationConfig, error) {
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("at least one destination address is required")
+	}
+
+	if len(tokens) == 1 && len(addresses) > 1 {
+		for len(tokens) < len(addresses) {
+			tokens = append(tokens, tokens[0])
+		}
+	}
+
+	if len(addresses) != len(tokens) {
+		return nil, fmt.Errorf("destination addresses and tokens must have the same length")
+	}
+
+	configs := make([]auditserver.DestinationConfig, 0, len(addresses))
+	for i := range addresses {
+		configs = append(configs, auditserver.DestinationConfig{
+			Address: addresses[i],
+			Token:   tokens[i],
+		})
+	}
+	return configs, nil
 }
