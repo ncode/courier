@@ -16,16 +16,18 @@ limitations under the License.
 package cmd
 
 import (
-	"crypto/tls"
 	"fmt"
-	"github.com/ncode/courier/pkg/auditserver"
-	"github.com/ncode/courier/pkg/broker"
-	"github.com/panjf2000/gnet/v2"
-	"github.com/redis/go-redis/v9"
-	"github.com/spf13/viper"
 	"log"
+	"log/slog"
+	"os"
+	"runtime"
+	"strings"
 
+	"github.com/ncode/courier/pkg/auditserver"
+	"github.com/ncode/courier/pkg/vault"
+	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 // auditServerCmd represents the auditServer command
@@ -38,36 +40,36 @@ The audit server listens for audit messages from Vault, based on the metadata of
 	Run: func(cmd *cobra.Command, args []string) {
 		addr := fmt.Sprintf("udp://%s", viper.GetString("vault.audit_address"))
 
-		var tlsConfig *tls.Config
-		var redisClient *redis.Client
-		if viper.GetBool("publisher.tls") {
-			cert, err := tls.LoadX509KeyPair(viper.GetString("publisher.server_cert"), viper.GetString("publisher.server_key"))
-			if err != nil {
-				log.Fatalf("Failed to load certificate: %v", err)
-			}
-			tlsConfig = &tls.Config{
-				MinVersion:   tls.VersionTLS12,
-				Certificates: []tls.Certificate{cert},
-			}
+		logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		workerConcurrency := viper.GetInt("worker.concurrency")
+		workerQueueSize := viper.GetInt("worker.queue_size")
 
-			redisClient = redis.NewClient(&redis.Options{
-				TLSConfig: tlsConfig,
-			})
+		sourceClient, err := vault.NewVaultClient(viper.GetString("vault.source.address"), vault.TokenAuth{Token: viper.GetString("vault.source.token")})
+		if err != nil {
+			log.Fatalf("Failed to create source vault client: %v", err)
 		}
 
-		if viper.GetBool("publisher.server") {
-			broker, err := broker.NewServer(viper.GetString("publisher.address"), nil)
-			if err != nil {
-				log.Fatalf("Failed to create publisher server: %v", err)
-			}
-			if viper.GetBool("publisher.tls") {
-				go func() { log.Fatal(broker.ListenAndServeTLS(tlsConfig)) }()
-			} else {
-				go func() { log.Fatal(broker.ListenAndServe()) }()
+		destAddrs := splitAndTrim(viper.GetString("vault.destinations.addresses"))
+		destTokens := splitAndTrim(viper.GetString("vault.destinations.tokens"))
+		if len(destTokens) == 1 && len(destAddrs) > 1 {
+			// Apply single token to all destinations if only one provided
+			for len(destTokens) < len(destAddrs) {
+				destTokens = append(destTokens, destTokens[0])
 			}
 		}
+		destConfigs, err := buildDestinationConfigs(destAddrs, destTokens)
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
 
-		server := auditserver.New(nil, redisClient)
+		syncer, err := auditserver.NewVaultSyncer(logger, sourceClient, destConfigs)
+		if err != nil {
+			log.Fatalf("Failed to create syncer: %v", err)
+		}
+
+		dispatcher := auditserver.NewDispatcher(logger, syncer.Handle, workerQueueSize, workerConcurrency)
+
+		server := auditserver.New(logger, dispatcher)
 		log.Fatal(gnet.Run(server, addr, gnet.WithMulticore(true)))
 	},
 }
@@ -75,14 +77,52 @@ The audit server listens for audit messages from Vault, based on the metadata of
 func init() {
 	rootCmd.AddCommand(auditServerCmd)
 
-	auditServerCmd.PersistentFlags().Bool("publisher.server", true, "enables local publisher server")
-	auditServerCmd.PersistentFlags().String("publisher.server_cert", "", "certificate file for publisher server")
-	auditServerCmd.PersistentFlags().String("publisher.server_key", "", "key file for publisher server")
-	auditServerCmd.PersistentFlags().Bool("publisher.tls", true, "publish messages via TLS")
-	auditServerCmd.PersistentFlags().String("publisher.address", "127.0.0.1:6380", "A help for foo")
-	viper.BindPFlag("publisher.server", auditServerCmd.PersistentFlags().Lookup("publisher.server"))
-	viper.BindPFlag("publisher.server_cert", auditServerCmd.PersistentFlags().Lookup("publisher.server_cert"))
-	viper.BindPFlag("publisher.server_key", auditServerCmd.PersistentFlags().Lookup("publisher.server_key"))
-	viper.BindPFlag("publisher.tls", auditServerCmd.PersistentFlags().Lookup("publisher.tls"))
-	viper.BindPFlag("publisher.address", auditServerCmd.PersistentFlags().Lookup("publisher.address"))
+	auditServerCmd.PersistentFlags().Int("worker.concurrency", runtime.NumCPU(), "number of worker goroutines processing sync tasks")
+	auditServerCmd.PersistentFlags().Int("worker.queue_size", 64, "queue size for pending sync tasks before dead-lettering")
+	auditServerCmd.PersistentFlags().String("vault.destinations.addresses", "", "comma-separated list of destination Vault addresses")
+	auditServerCmd.PersistentFlags().String("vault.destinations.tokens", "", "comma-separated list of destination Vault tokens (align with addresses)")
+	viper.BindPFlag("worker.concurrency", auditServerCmd.PersistentFlags().Lookup("worker.concurrency"))
+	viper.BindPFlag("worker.queue_size", auditServerCmd.PersistentFlags().Lookup("worker.queue_size"))
+	viper.BindPFlag("vault.destinations.addresses", auditServerCmd.PersistentFlags().Lookup("vault.destinations.addresses"))
+	viper.BindPFlag("vault.destinations.tokens", auditServerCmd.PersistentFlags().Lookup("vault.destinations.tokens"))
+}
+
+func splitAndTrim(input string) []string {
+	if input == "" {
+		return nil
+	}
+	parts := strings.Split(input, ",")
+	var out []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func buildDestinationConfigs(addresses, tokens []string) ([]auditserver.DestinationConfig, error) {
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("at least one destination address is required")
+	}
+
+	if len(tokens) == 1 && len(addresses) > 1 {
+		for len(tokens) < len(addresses) {
+			tokens = append(tokens, tokens[0])
+		}
+	}
+
+	if len(addresses) != len(tokens) {
+		return nil, fmt.Errorf("destination addresses and tokens must have the same length")
+	}
+
+	configs := make([]auditserver.DestinationConfig, 0, len(addresses))
+	for i := range addresses {
+		configs = append(configs, auditserver.DestinationConfig{
+			Address: addresses[i],
+			Token:   tokens[i],
+		})
+	}
+	return configs, nil
 }

@@ -3,6 +3,7 @@ package vault
 import (
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 
 	vault "github.com/hashicorp/vault/api"
@@ -45,6 +46,15 @@ type JWTAuth struct {
 type K8sAuth struct {
 	Role string
 	JWT  string
+}
+
+type ClientOption func(*vault.Config)
+
+// WithHTTPClient allows callers (and tests) to supply a custom HTTP client.
+func WithHTTPClient(httpClient *http.Client) ClientOption {
+	return func(cfg *vault.Config) {
+		cfg.HttpClient = httpClient
+	}
 }
 
 func (t TokenAuth) Authenticate(client *vault.Client) error {
@@ -127,9 +137,13 @@ func (k K8sAuth) ConfigureTLS(*vault.Config) error {
 	return nil
 }
 
-func NewVaultClient(address string, authMethod AuthMethod) (*VaultClient, error) {
+func NewVaultClient(address string, authMethod AuthMethod, opts ...ClientOption) (*VaultClient, error) {
 	config := vault.DefaultConfig()
 	config.Address = address
+
+	for _, opt := range opts {
+		opt(config)
+	}
 
 	client, err := vault.NewClient(config)
 	if err != nil {

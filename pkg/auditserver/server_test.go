@@ -8,11 +8,11 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/redis/go-redis/v9"
 )
 
 // mockConn is a mock implementation of gnet.Conn for v2
@@ -22,6 +22,35 @@ type mockConn struct {
 
 func newMockConn(data []byte) *mockConn {
 	return &mockConn{buf: bytes.NewBuffer(data)}
+}
+
+type safeBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *safeBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func (s *safeBuffer) Bytes() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.b.Bytes()...)
+}
+
+func (s *safeBuffer) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Len()
 }
 
 // Reader interface
@@ -61,14 +90,14 @@ func (m *mockConn) AsyncWrite(buf []byte, cb gnet.AsyncCallback) error   { retur
 func (m *mockConn) AsyncWritev(bs [][]byte, cb gnet.AsyncCallback) error { return nil }
 
 // Socket interface
-func (m *mockConn) Fd() int                                                              { return 0 }
-func (m *mockConn) Dup() (int, error)                                                    { return 0, nil }
-func (m *mockConn) SetReadBuffer(size int) error                                         { return nil }
-func (m *mockConn) SetWriteBuffer(size int) error                                        { return nil }
-func (m *mockConn) SetLinger(secs int) error                                             { return nil }
-func (m *mockConn) SetKeepAlivePeriod(d time.Duration) error                             { return nil }
-func (m *mockConn) SetKeepAlive(enabled bool, idle, intvl time.Duration, cnt int) error  { return nil }
-func (m *mockConn) SetNoDelay(noDelay bool) error                                        { return nil }
+func (m *mockConn) Fd() int                                                             { return 0 }
+func (m *mockConn) Dup() (int, error)                                                   { return 0, nil }
+func (m *mockConn) SetReadBuffer(size int) error                                        { return nil }
+func (m *mockConn) SetWriteBuffer(size int) error                                       { return nil }
+func (m *mockConn) SetLinger(secs int) error                                            { return nil }
+func (m *mockConn) SetKeepAlivePeriod(d time.Duration) error                            { return nil }
+func (m *mockConn) SetKeepAlive(enabled bool, idle, intvl time.Duration, cnt int) error { return nil }
+func (m *mockConn) SetNoDelay(noDelay bool) error                                       { return nil }
 
 // Conn interface
 func (m *mockConn) Context() any                                  { return nil }
@@ -208,8 +237,8 @@ func TestAuditServer_OnTraffic(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var logBuffer bytes.Buffer
-			logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelInfo}))
+			logBuffer := &safeBuffer{}
+			logger := slog.New(slog.NewJSONHandler(logBuffer, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 			server := New(logger, nil)
 
@@ -234,7 +263,11 @@ func TestAuditServer_OnTraffic(t *testing.T) {
 					t.Errorf("Expected log output, but got none")
 				} else {
 					var logEntry map[string]interface{}
-					err := json.Unmarshal(logBuffer.Bytes(), &logEntry)
+					lines := bytes.Split(bytes.TrimSpace(logBuffer.Bytes()), []byte("\n"))
+					if len(lines) == 0 {
+						t.Fatalf("Expected log output lines, but found none")
+					}
+					err := json.Unmarshal(lines[0], &logEntry)
 					if err != nil {
 						t.Fatalf("Failed to parse log output: %v", err)
 					}
@@ -254,24 +287,17 @@ func TestAuditServer_OnTraffic(t *testing.T) {
 }
 
 func TestNew(t *testing.T) {
-	// Test with nil logger and nil publisher
+	// Test with nil logger and nil dispatcher
 	server := New(nil, nil)
 	if server.logger == nil {
 		t.Errorf("Expected non-nil logger when initialized with nil")
 	}
-	if server.publisher != nil {
-		t.Errorf("Expected nil publisher when initialized with nil")
-	}
 
-	// Test with custom logger and publisher
+	// Test with custom logger
 	customLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	customPublisher := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-	server = New(customLogger, customPublisher)
+	server = New(customLogger, nil)
 	if server.logger != customLogger {
 		t.Errorf("Expected custom logger to be used")
-	}
-	if server.publisher != customPublisher {
-		t.Errorf("Expected custom publisher to be used")
 	}
 }
 
@@ -318,8 +344,8 @@ func TestAuditServer_OnTraffic_NonRelevantOperations(t *testing.T) {
 }
 
 func TestAuditServer_OnTraffic_LoggingBehavior(t *testing.T) {
-	var logBuffer bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logBuffer := &safeBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuffer, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	server := New(logger, nil)
 
 	validInput := AuditLog{
@@ -354,8 +380,8 @@ func TestAuditServer_OnTraffic_LoggingBehavior(t *testing.T) {
 }
 
 func TestAuditServer_OnTraffic_JSONParseError(t *testing.T) {
-	var logBuffer bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelError}))
+	logBuffer := &safeBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuffer, &slog.HandlerOptions{Level: slog.LevelError}))
 	server := New(logger, nil)
 
 	// Create an input that will pass the initial checks but fail JSON unmarshaling
@@ -390,5 +416,44 @@ func TestAuditServer_OnTraffic_JSONParseError(t *testing.T) {
 		t.Errorf("Expected 'error' field in log output to be a string")
 	} else if !strings.Contains(errorMsg, "invalid character") {
 		t.Errorf("Expected error message to contain 'invalid character', got: %s", errorMsg)
+	}
+}
+
+func TestAuditServer_OnTraffic_EnqueuesDispatcher(t *testing.T) {
+	callCh := make(chan string, 1)
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	dispatcher := NewDispatcher(logger, func(event UpdateEvent) error {
+		callCh <- string(event.Kind) + ":" + event.Path + ":" + event.Operation
+		return nil
+	}, 1, 1)
+	server := New(logger, dispatcher)
+
+	input := AuditLog{
+		Auth: Auth{
+			PolicyResults: struct {
+				Allowed bool `json:"allowed"`
+			}{Allowed: true},
+		},
+		Request: Request{
+			Operation: "update",
+			MountType: "kv",
+			Path:      "/secret/test",
+		},
+		Response: Response{
+			MountType: "kv",
+		},
+	}
+
+	inputJSON, _ := json.Marshal(input)
+	server.OnTraffic(newMockConn(inputJSON))
+
+	select {
+	case got := <-callCh:
+		if got != "kv:/secret/test:update" {
+			t.Fatalf("unexpected dispatcher input: %s", got)
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatalf("dispatcher was not invoked")
 	}
 }

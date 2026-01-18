@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/redis/go-redis/v9"
 )
 
 var (
@@ -15,7 +15,6 @@ var (
 	operationCreate = []byte(`"operation":"create"`)
 	operationDelete = []byte(`"operation":"delete"`)
 	allowedPolicy   = []byte(`"policy_results":{"allowed":true`)
-	mountTypeKV     = []byte(`"mount_type":"kv"`)
 )
 
 type Request struct {
@@ -56,17 +55,12 @@ type AuditLog struct {
 
 type AuditServer struct {
 	gnet.BuiltinEventEngine
-	logger    *slog.Logger
-	publisher *redis.Client
+	logger     *slog.Logger
+	dispatcher *Dispatcher
 }
 
 func (as *AuditServer) OnTraffic(c gnet.Conn) gnet.Action {
 	frame, _ := c.Next(-1)
-
-	if !bytes.Contains(frame, mountTypeKV) {
-		// Skip events that are not kv, we only care about kv at the moment
-		return gnet.Close
-	}
 
 	if !bytes.Contains(frame, allowedPolicy) {
 		// Skip events that are not allowed
@@ -85,23 +79,54 @@ func (as *AuditServer) OnTraffic(c gnet.Conn) gnet.Action {
 		return gnet.Close
 	}
 
-	if auditLog.Auth.PolicyResults.Allowed == true && auditLog.Response.MountType == "kv" {
-		logAttrs := []any{
-			"operation", auditLog.Request.Operation,
-			"path", auditLog.Request.Path,
-		}
-		as.logger.Info("Received audit log", logAttrs...)
+	if auditLog.Auth.PolicyResults.Allowed != true {
+		return gnet.Close
+	}
+
+	kind, ok := resolveUpdateKind(auditLog)
+	if !ok {
+		return gnet.Close
+	}
+
+	logAttrs := []any{
+		"kind", kind,
+		"operation", auditLog.Request.Operation,
+		"path", auditLog.Request.Path,
+	}
+	as.logger.Info("Received audit log", logAttrs...)
+
+	if as.dispatcher != nil {
+		as.dispatcher.Enqueue(UpdateEvent{
+			Kind:      kind,
+			Path:      auditLog.Request.Path,
+			Operation: auditLog.Request.Operation,
+		})
 	}
 
 	return gnet.None
 }
 
-func New(logger *slog.Logger, publisher *redis.Client) *AuditServer {
+func New(logger *slog.Logger, dispatcher *Dispatcher) *AuditServer {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
-	return &AuditServer{
-		logger:    logger,
-		publisher: publisher,
+	if dispatcher == nil {
+		dispatcher = NewDispatcher(logger, nil, 0, 0)
 	}
+	return &AuditServer{
+		logger:     logger,
+		dispatcher: dispatcher,
+	}
+}
+
+func resolveUpdateKind(auditLog AuditLog) (UpdateKind, bool) {
+	if auditLog.Request.MountType == "kv" || auditLog.Response.MountType == "kv" {
+		return UpdateKindKV, true
+	}
+
+	if strings.HasPrefix(auditLog.Request.Path, "sys/policies") {
+		return UpdateKindPolicy, true
+	}
+
+	return "", false
 }
