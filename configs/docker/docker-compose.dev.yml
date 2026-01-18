@@ -1,0 +1,70 @@
+services:
+  vault-source:
+    image: hashicorp/vault:latest
+    container_name: vault-source
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "root"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    command: "vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200"
+
+  vault-dest-1:
+    image: hashicorp/vault:latest
+    container_name: vault-dest-1
+    ports:
+      - "8201:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "root"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    command: "vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200"
+
+  vault-dest-2:
+    image: hashicorp/vault:latest
+    container_name: vault-dest-2
+    ports:
+      - "8202:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "root"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    command: "vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200"
+
+  courier-audit:
+    image: courier:dev
+    container_name: courier-audit
+    build:
+      context: ../..
+      dockerfile: configs/docker/Dockerfile
+    depends_on:
+      - vault-source
+      - vault-dest-1
+      - vault-dest-2
+    command: >
+      auditServer
+      --vault.source.token root
+      --vault.source.address http://vault-source:8200
+      --vault.audit_address courier-audit:1269
+      --vault.destinations.addresses http://vault-dest-1:8200,http://vault-dest-2:8200
+      --vault.destinations.tokens root,root
+      --worker.concurrency 2
+      --worker.queue_size 128
+
+  courier-setup:
+    image: courier:dev
+    container_name: courier-setup
+    build:
+      context: ../..
+      dockerfile: configs/docker/Dockerfile
+    depends_on:
+      - courier-audit
+    command: >
+      setup
+      --vault.source.token root
+      --vault.source.address http://vault-source:8200
+      --vault.audit_address courier-audit:1269

@@ -1,3 +1,3 @@
 FROM scratch
-COPY courier /courier
+COPY configs/docker/courier /courier
 ENTRYPOINT ["/courier"]

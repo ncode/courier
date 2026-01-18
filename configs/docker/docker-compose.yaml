@@ -55,7 +55,7 @@ services:
       - vault_replica_red
       - vault_replica_green
       - vault_replica_blue
-    command: "auditServer --vault.source.token root --vault.audit_address courier_auditserver:1269 --publisher.tls=false"
+    command: "auditServer --vault.source.token root --vault.audit_address courier_auditserver:1269"
 
   courier_setup:
     image: ncode/courier:dev
@@ -77,4 +77,3 @@ services:
     cap_add:
       - IPC_LOCK
     entrypoint: "/scripts/writer.sh"
-
