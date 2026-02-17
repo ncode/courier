@@ -10,42 +10,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-type Request struct {
-	MountClass          string `json:"mount_class"`
-	MountPoint          string `json:"mount_point"`
-	MountRunningVersion string `json:"mount_running_version"`
-	MountType           string `json:"mount_type"`
-	Operation           string `json:"operation"`
-	Path                string `json:"path"`
-}
-
-type Response struct {
-	MountAccessor             string `json:"mount_accessor"`
-	MountClass                string `json:"mount_class"`
-	MountPoint                string `json:"mount_point"`
-	MountRunningPluginVersion string `json:"mount_running_plugin_version"`
-	MountType                 string `json:"mount_type"`
-}
-
-type Auth struct {
-	Accessor      string `json:"accessor"`
-	ClientToken   string `json:"client_token"`
-	DisplayName   string `json:"display_name"`
-	PolicyResults struct {
-		Allowed bool `json:"allowed"`
-	} `json:"policy_results"`
-}
-
-type AuditLog struct {
-	Type       string   `json:"type"`
-	Time       string   `json:"time"`
-	Auth       Auth     `json:"auth"`
-	Request    Request  `json:"request"`
-	Response   Response `json:"response"`
-	Error      string   `json:"error"`
-	RemoteAddr string   `json:"remote_addr"`
-}
-
 var courierAuditRules = []vaultfilter.RuleGroupConfig{
 	{
 		Name: "courier-filter",
@@ -72,62 +36,28 @@ func (as *AuditServer) handleFrame(frame []byte) gnet.Action {
 		return gnet.Close
 	}
 
-	auditLog := toAuditLog(result.Log)
-	kind, ok := resolveUpdateKind(auditLog)
+	event, ok := toUpdateEvent(result.Log)
 	if !ok {
 		return gnet.Close
 	}
 
 	logAttrs := []any{
-		"kind", kind,
-		"operation", auditLog.Request.Operation,
-		"path", auditLog.Request.Path,
+		"kind", event.Kind,
+		"operation", event.Operation,
+		"path", event.Path,
+		"matched_groups", result.MatchedGroups,
 	}
 	as.logger.Info("Received audit log", logAttrs...)
 
 	if as.dispatcher != nil {
 		as.dispatcher.Enqueue(UpdateEvent{
-			Kind:      kind,
-			Path:      auditLog.Request.Path,
-			Operation: auditLog.Request.Operation,
+			Kind:      event.Kind,
+			Path:      event.Path,
+			Operation: event.Operation,
 		})
 	}
 
 	return gnet.None
-}
-
-func toAuditLog(log vaultfilter.AuditLog) AuditLog {
-	return AuditLog{
-		Type: log.Type,
-		Time: log.Time,
-		Auth: Auth{
-			Accessor:    log.Auth.Accessor,
-			ClientToken: log.Auth.ClientToken,
-			DisplayName: log.Auth.DisplayName,
-			PolicyResults: struct {
-				Allowed bool `json:"allowed"`
-			}{
-				Allowed: log.Auth.PolicyResults.Allowed,
-			},
-		},
-		Request: Request{
-			MountClass:          log.Request.MountClass,
-			MountPoint:          log.Request.MountPoint,
-			MountRunningVersion: log.Request.MountRunningVersion,
-			MountType:           log.Request.MountType,
-			Operation:           log.Request.Operation,
-			Path:                log.Request.Path,
-		},
-		Response: Response{
-			MountAccessor:             log.Response.MountAccessor,
-			MountClass:                log.Response.MountClass,
-			MountPoint:                log.Response.MountPoint,
-			MountRunningPluginVersion: log.Response.MountRunningPluginVersion,
-			MountType:                 log.Response.MountType,
-		},
-		Error:      log.Error,
-		RemoteAddr: log.RemoteAddr,
-	}
 }
 
 func (as *AuditServer) OnTraffic(c gnet.Conn) gnet.Action {
@@ -161,7 +91,7 @@ func New(logger *slog.Logger, dispatcher *Dispatcher) *AuditServer {
 	}
 }
 
-func resolveUpdateKind(auditLog AuditLog) (UpdateKind, bool) {
+func resolveUpdateKind(auditLog vaultfilter.AuditLog) (UpdateKind, bool) {
 	if auditLog.Request.MountType == "kv" || auditLog.Response.MountType == "kv" {
 		return UpdateKindKV, true
 	}
@@ -171,4 +101,17 @@ func resolveUpdateKind(auditLog AuditLog) (UpdateKind, bool) {
 	}
 
 	return "", false
+}
+
+func toUpdateEvent(log vaultfilter.AuditLog) (UpdateEvent, bool) {
+	kind, ok := resolveUpdateKind(log)
+	if !ok {
+		return UpdateEvent{}, false
+	}
+
+	return UpdateEvent{
+		Kind:      kind,
+		Path:      log.Request.Path,
+		Operation: log.Request.Operation,
+	}, true
 }
