@@ -1,20 +1,13 @@
 package auditserver
 
 import (
-	"bytes"
-	"encoding/json"
+	vaultfilter "github.com/ncode/vault-audit-filter/pkg/auditserver"
 	"log/slog"
 	"os"
 	"strings"
 
 	"github.com/panjf2000/gnet/v2"
-)
-
-var (
-	operationUpdate = []byte(`"operation":"update"`)
-	operationCreate = []byte(`"operation":"create"`)
-	operationDelete = []byte(`"operation":"delete"`)
-	allowedPolicy   = []byte(`"policy_results":{"allowed":true`)
+	"github.com/spf13/viper"
 )
 
 type Request struct {
@@ -53,36 +46,33 @@ type AuditLog struct {
 	RemoteAddr string   `json:"remote_addr"`
 }
 
+var courierAuditRules = []vaultfilter.RuleGroupConfig{
+	{
+		Name: "courier-filter",
+		Rules: []string{
+			`Auth.PolicyResults.Allowed == true && Request.Operation in ["create", "update", "delete"]`,
+		},
+	},
+}
+
 type AuditServer struct {
 	gnet.BuiltinEventEngine
 	logger     *slog.Logger
+	matcher    *vaultfilter.AuditServer
 	dispatcher *Dispatcher
 }
 
-func (as *AuditServer) OnTraffic(c gnet.Conn) gnet.Action {
-	frame, _ := c.Next(-1)
-
-	if !bytes.Contains(frame, allowedPolicy) {
-		// Skip events that are not allowed
-		return gnet.Close
-	}
-
-	if !bytes.Contains(frame, operationUpdate) && !bytes.Contains(frame, operationCreate) && !bytes.Contains(frame, operationDelete) {
-		// Skip events that are not relevant for courier
-		return gnet.Close
-	}
-
-	var auditLog AuditLog
-	err := json.Unmarshal(frame, &auditLog)
+func (as *AuditServer) handleFrame(frame []byte) gnet.Action {
+	result, err := as.matcher.MatchFrame(frame)
 	if err != nil {
 		as.logger.Error("Error parsing audit log", "error", err)
 		return gnet.Close
 	}
-
-	if auditLog.Auth.PolicyResults.Allowed != true {
+	if !result.Matched {
 		return gnet.Close
 	}
 
+	auditLog := toAuditLog(result.Log)
 	kind, ok := resolveUpdateKind(auditLog)
 	if !ok {
 		return gnet.Close
@@ -106,6 +96,51 @@ func (as *AuditServer) OnTraffic(c gnet.Conn) gnet.Action {
 	return gnet.None
 }
 
+func toAuditLog(log vaultfilter.AuditLog) AuditLog {
+	return AuditLog{
+		Type: log.Type,
+		Time: log.Time,
+		Auth: Auth{
+			Accessor:    log.Auth.Accessor,
+			ClientToken: log.Auth.ClientToken,
+			DisplayName: log.Auth.DisplayName,
+			PolicyResults: struct {
+				Allowed bool `json:"allowed"`
+			}{
+				Allowed: log.Auth.PolicyResults.Allowed,
+			},
+		},
+		Request: Request{
+			MountClass:          log.Request.MountClass,
+			MountPoint:          log.Request.MountPoint,
+			MountRunningVersion: log.Request.MountRunningVersion,
+			MountType:           log.Request.MountType,
+			Operation:           log.Request.Operation,
+			Path:                log.Request.Path,
+		},
+		Response: Response{
+			MountAccessor:             log.Response.MountAccessor,
+			MountClass:                log.Response.MountClass,
+			MountPoint:                log.Response.MountPoint,
+			MountRunningPluginVersion: log.Response.MountRunningPluginVersion,
+			MountType:                 log.Response.MountType,
+		},
+		Error:      log.Error,
+		RemoteAddr: log.RemoteAddr,
+	}
+}
+
+func (as *AuditServer) OnTraffic(c gnet.Conn) gnet.Action {
+	frame, _ := c.Next(-1)
+
+	if as.matcher == nil {
+		as.logger.Error("Audit matcher is not initialized", "error", "nil matcher")
+		return gnet.Close
+	}
+
+	return as.handleFrame(frame)
+}
+
 func New(logger *slog.Logger, dispatcher *Dispatcher) *AuditServer {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -113,8 +148,15 @@ func New(logger *slog.Logger, dispatcher *Dispatcher) *AuditServer {
 	if dispatcher == nil {
 		dispatcher = NewDispatcher(logger, nil, 0, 0)
 	}
+	viper.Set("rule_groups", courierAuditRules)
+	matcher, err := vaultfilter.New(logger)
+	if err != nil {
+		logger.Error("Failed to initialize audit matcher", "error", err)
+		matcher = nil
+	}
 	return &AuditServer{
 		logger:     logger,
+		matcher:    matcher,
 		dispatcher: dispatcher,
 	}
 }
