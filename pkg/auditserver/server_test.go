@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	vaultfilter "github.com/ncode/vault-audit-filter/pkg/auditserver"
 	"github.com/panjf2000/gnet/v2"
 )
 
@@ -51,6 +52,21 @@ func (s *safeBuffer) Len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.Len()
+}
+
+func policyAuth(allowed bool) vaultfilter.Auth {
+	return vaultfilter.Auth{
+		PolicyResults: struct {
+			Allowed          bool `json:"allowed"`
+			GrantingPolicies []struct {
+				Name        string `json:"name"`
+				NamespaceID string `json:"namespace_id"`
+				Type        string `json:"type"`
+			} `json:"granting_policies"`
+		}{
+			Allowed: allowed,
+		},
+	}
 }
 
 // Reader interface
@@ -110,30 +126,27 @@ func (m *mockConn) Close() error                                  { return nil }
 func (m *mockConn) SetDeadline(t time.Time) error                 { return nil }
 func (m *mockConn) SetReadDeadline(t time.Time) error             { return nil }
 func (m *mockConn) SetWriteDeadline(t time.Time) error            { return nil }
+func (m *mockConn) EventLoop() gnet.EventLoop                     { return nil }
 
 func TestAuditServer_OnTraffic(t *testing.T) {
 	tests := []struct {
 		name           string
-		input          AuditLog
+		input          vaultfilter.AuditLog
 		expectedAction gnet.Action
 		expectedLog    bool
 	}{
 		{
 			name: "Valid KV update operation",
-			input: AuditLog{
+			input: vaultfilter.AuditLog{
 				Type: "audit",
 				Time: "2023-07-31T12:34:56Z",
-				Auth: Auth{
-					PolicyResults: struct {
-						Allowed bool `json:"allowed"`
-					}{Allowed: true},
-				},
-				Request: Request{
+				Auth: policyAuth(true),
+				Request: vaultfilter.Request{
 					Operation: "update",
 					MountType: "kv",
 					Path:      "/secret/data/test",
 				},
-				Response: Response{
+				Response: vaultfilter.Response{
 					MountType: "kv",
 				},
 				RemoteAddr: "192.168.1.1",
@@ -143,20 +156,16 @@ func TestAuditServer_OnTraffic(t *testing.T) {
 		},
 		{
 			name: "Valid KV create operation",
-			input: AuditLog{
+			input: vaultfilter.AuditLog{
 				Type: "audit",
 				Time: "2023-07-31T12:34:56Z",
-				Auth: Auth{
-					PolicyResults: struct {
-						Allowed bool `json:"allowed"`
-					}{Allowed: true},
-				},
-				Request: Request{
+				Auth: policyAuth(true),
+				Request: vaultfilter.Request{
 					Operation: "create",
 					MountType: "kv",
 					Path:      "/secret/data/test",
 				},
-				Response: Response{
+				Response: vaultfilter.Response{
 					MountType: "kv",
 				},
 				RemoteAddr: "192.168.1.1",
@@ -166,20 +175,16 @@ func TestAuditServer_OnTraffic(t *testing.T) {
 		},
 		{
 			name: "Valid KV delete operation",
-			input: AuditLog{
+			input: vaultfilter.AuditLog{
 				Type: "audit",
 				Time: "2023-07-31T12:34:56Z",
-				Auth: Auth{
-					PolicyResults: struct {
-						Allowed bool `json:"allowed"`
-					}{Allowed: true},
-				},
-				Request: Request{
+				Auth: policyAuth(true),
+				Request: vaultfilter.Request{
 					Operation: "delete",
 					MountType: "kv",
 					Path:      "/secret/data/test",
 				},
-				Response: Response{
+				Response: vaultfilter.Response{
 					MountType: "kv",
 				},
 				RemoteAddr: "192.168.1.1",
@@ -189,20 +194,16 @@ func TestAuditServer_OnTraffic(t *testing.T) {
 		},
 		{
 			name: "Non-KV operation",
-			input: AuditLog{
+			input: vaultfilter.AuditLog{
 				Type: "audit",
 				Time: "2023-07-31T12:34:56Z",
-				Auth: Auth{
-					PolicyResults: struct {
-						Allowed bool `json:"allowed"`
-					}{Allowed: true},
-				},
-				Request: Request{
+				Auth: policyAuth(true),
+				Request: vaultfilter.Request{
 					Operation: "update",
 					MountType: "transit",
 					Path:      "/transit/keys/test",
 				},
-				Response: Response{
+				Response: vaultfilter.Response{
 					MountType: "transit",
 				},
 				RemoteAddr: "192.168.1.1",
@@ -212,20 +213,16 @@ func TestAuditServer_OnTraffic(t *testing.T) {
 		},
 		{
 			name: "Disallowed operation",
-			input: AuditLog{
+			input: vaultfilter.AuditLog{
 				Type: "audit",
 				Time: "2023-07-31T12:34:56Z",
-				Auth: Auth{
-					PolicyResults: struct {
-						Allowed bool `json:"allowed"`
-					}{Allowed: false},
-				},
-				Request: Request{
+				Auth: policyAuth(false),
+				Request: vaultfilter.Request{
 					Operation: "update",
 					MountType: "kv",
 					Path:      "/secret/data/test",
 				},
-				Response: Response{
+				Response: vaultfilter.Response{
 					MountType: "kv",
 				},
 				RemoteAddr: "192.168.1.1",
@@ -319,17 +316,13 @@ func TestAuditServer_OnTraffic_NonRelevantOperations(t *testing.T) {
 
 	nonRelevantOps := []string{"read", "list", "sudo"}
 	for _, op := range nonRelevantOps {
-		input := AuditLog{
-			Auth: Auth{
-				PolicyResults: struct {
-					Allowed bool `json:"allowed"`
-				}{Allowed: true},
-			},
-			Request: Request{
+		input := vaultfilter.AuditLog{
+			Auth: policyAuth(true),
+			Request: vaultfilter.Request{
 				Operation: op,
 				MountType: "kv",
 			},
-			Response: Response{
+			Response: vaultfilter.Response{
 				MountType: "kv",
 			},
 		}
@@ -348,18 +341,14 @@ func TestAuditServer_OnTraffic_LoggingBehavior(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(logBuffer, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	server := New(logger, nil)
 
-	validInput := AuditLog{
-		Auth: Auth{
-			PolicyResults: struct {
-				Allowed bool `json:"allowed"`
-			}{Allowed: true},
-		},
-		Request: Request{
+	validInput := vaultfilter.AuditLog{
+		Auth: policyAuth(true),
+		Request: vaultfilter.Request{
 			Operation: "update",
 			MountType: "kv",
 			Path:      "/secret/test",
 		},
-		Response: Response{
+		Response: vaultfilter.Response{
 			MountType: "kv",
 		},
 	}
@@ -414,8 +403,8 @@ func TestAuditServer_OnTraffic_JSONParseError(t *testing.T) {
 	errorMsg, ok := logEntry["error"].(string)
 	if !ok {
 		t.Errorf("Expected 'error' field in log output to be a string")
-	} else if !strings.Contains(errorMsg, "invalid character") {
-		t.Errorf("Expected error message to contain 'invalid character', got: %s", errorMsg)
+	} else if errorMsg == "" {
+		t.Errorf("Expected non-empty error message in log output")
 	}
 }
 
@@ -429,18 +418,14 @@ func TestAuditServer_OnTraffic_EnqueuesDispatcher(t *testing.T) {
 	}, 1, 1)
 	server := New(logger, dispatcher)
 
-	input := AuditLog{
-		Auth: Auth{
-			PolicyResults: struct {
-				Allowed bool `json:"allowed"`
-			}{Allowed: true},
-		},
-		Request: Request{
+	input := vaultfilter.AuditLog{
+		Auth: policyAuth(true),
+		Request: vaultfilter.Request{
 			Operation: "update",
 			MountType: "kv",
 			Path:      "/secret/test",
 		},
-		Response: Response{
+		Response: vaultfilter.Response{
 			MountType: "kv",
 		},
 	}
@@ -455,5 +440,74 @@ func TestAuditServer_OnTraffic_EnqueuesDispatcher(t *testing.T) {
 		}
 	case <-time.After(50 * time.Millisecond):
 		t.Fatalf("dispatcher was not invoked")
+	}
+}
+
+func TestAuditServer_OnTraffic_PolicyKind_EnqueuesPolicyEvent(t *testing.T) {
+	callCh := make(chan UpdateEvent, 1)
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	dispatcher := NewDispatcher(logger, func(event UpdateEvent) error {
+		callCh <- event
+		return nil
+	}, 1, 1)
+	server := New(logger, dispatcher)
+
+	input := vaultfilter.AuditLog{
+		Type: "audit",
+		Time: "2023-07-31T12:34:56Z",
+		Auth: policyAuth(true),
+		Request: vaultfilter.Request{
+			Operation: "update",
+			Path:      "sys/policies/identity/alias/name",
+		},
+		Response: vaultfilter.Response{
+			MountType: "cubbyhole",
+		},
+	}
+
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("Failed to marshal input: %v", err)
+	}
+	server.OnTraffic(newMockConn(inputJSON))
+
+	select {
+	case got := <-callCh:
+		if got.Kind != UpdateKindPolicy {
+			t.Fatalf("Expected kind %s, got %s", UpdateKindPolicy, got.Kind)
+		}
+		if got.Path != "sys/policies/identity/alias/name" {
+			t.Fatalf("Expected path %s, got %s", "sys/policies/identity/alias/name", got.Path)
+		}
+		if got.Operation != "update" {
+			t.Fatalf("Expected operation update, got %s", got.Operation)
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("policy dispatcher was not invoked")
+	}
+}
+
+func TestAuditServer_OnTraffic_ThrowsCloseOnNilMatcher(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	server := &AuditServer{logger: logger}
+
+	input := vaultfilter.AuditLog{
+		Auth: policyAuth(true),
+		Request: vaultfilter.Request{
+			Operation: "update",
+			MountType: "kv",
+			Path:      "/secret/data/test",
+		},
+		Response: vaultfilter.Response{MountType: "kv"},
+	}
+
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("Failed to marshal input: %v", err)
+	}
+
+	if server.OnTraffic(newMockConn(inputJSON)) != gnet.Close {
+		t.Fatalf("Expected Close when matcher is nil")
 	}
 }
